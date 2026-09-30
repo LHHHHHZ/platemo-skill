@@ -1,0 +1,5 @@
+__pycache__/
+*.pyc
+batch_run.log
+experiment_config.json
+experiment_metrics.json

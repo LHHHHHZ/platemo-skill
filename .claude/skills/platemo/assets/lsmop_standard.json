@@ -1,0 +1,22 @@
+{
+  "algorithms": [
+    {"class": "LMOCSO", "params": []},
+    {"class": "NSGAII", "params": []}
+  ],
+  "problems": [
+    {"class": "LSMOP1", "M": 3, "D": 500},
+    {"class": "LSMOP2", "M": 3, "D": 500},
+    {"class": "LSMOP3", "M": 3, "D": 500},
+    {"class": "LSMOP4", "M": 3, "D": 500},
+    {"class": "LSMOP5", "M": 3, "D": 500},
+    {"class": "LSMOP6", "M": 3, "D": 500},
+    {"class": "LSMOP7", "M": 3, "D": 500},
+    {"class": "LSMOP8", "M": 3, "D": 500},
+    {"class": "LSMOP9", "M": 3, "D": 500}
+  ],
+  "N": 100,
+  "maxFE": 100000,
+  "runs": 10,
+  "metrics": ["IGD", "HV"],
+  "save_count": 6
+}
