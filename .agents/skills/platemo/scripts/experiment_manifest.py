@@ -38,6 +38,20 @@ def load_manifest(path):
         if data["status"] != "completed":
             raise ValueError(f"Experiment is not completed: {data['status']}")
         cfg = data["config"]
+        if 'seed_policy' in cfg and 'seeds' not in cfg:
+            raise ValueError('seed_policy requires an explicit seeds list')
+        if "seeds" in cfg:
+            seeds = cfg["seeds"]
+            if (not isinstance(seeds, list) or len(seeds) != cfg["runs"]
+                    or any(type(seed) is not int or not 0 <= seed < 2**32 for seed in seeds)
+                    or len(set(seeds)) != len(seeds)):
+                raise ValueError("seeds must contain one unique uint32 integer per run")
+            policy = cfg.get("seed_policy", {})
+            if (not isinstance(policy, dict) or policy.get("schema_version") != 1
+                    or policy.get("design") != "paired" or policy.get("entrypoint") != "direct_solve"
+                    or policy.get("matlab_generator") != "twister"
+                    or policy.get("python_policy") != "deterministic-v1"):
+                raise ValueError("Unsupported or missing seed_policy")
         algorithms = cfg["algorithms"]
         problems = cfg["problems"]
         # MATLAB jsonencode 保留 cell 数组，包括单元素数组。
@@ -57,6 +71,8 @@ def load_manifest(path):
             if identity not in expected or identity in seen:
                 raise ValueError(f"Unexpected or duplicate run: {identity}")
             seen.add(identity)
+            if "seeds" in cfg and record.get("seed") != cfg["seeds"][record["run"]-1]:
+                raise ValueError(f"Run seed does not match config: {identity}")
             spec = labels[record["label"]]
             problem = problems[record["problem_index"] - 1]
             if (record["status"] != "ok" or record["experiment_id"] != data["experiment_id"]
@@ -138,6 +154,7 @@ def experiment_files(args):
                 "problem_params": record["problem_params"],
                 "problem_sources": source_signature(record["problem_sources"]),
                 "platform_sources": source_signature(manifest["platform_sources"]),
+                "seed_policy": cfg.get("seed_policy"),
             })
             if key in protocols and protocols[key] != protocol:
                 raise ValueError(f"Incompatible comparison protocol for {key}: N/maxFE/save_count/problem/metric sources differ")

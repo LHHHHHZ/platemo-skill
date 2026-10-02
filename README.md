@@ -35,7 +35,7 @@ pip install -r requirements.txt
 
 每次批量运行会新建 `PlatEMO/Experiments/<experiment_id>/`，其中包含配置快照、结果清单、日志和独立的 `.mat` 结果。编号默认自动生成，也可在配置中指定 `experiment_id`；已存在时拒绝运行，避免覆盖旧实验。可选 `experiment_root` 用于自定义实验根目录，相对路径以配置文件所在目录为基准。
 
-运行命令保持不变。运行器通过平台支持的 `outputFcn` 保存结果，保留 PlatEMO 的 `result`、`metric` 和指标计算；不向公共 `Data/<算法>/` 写入批处理结果。日志输出 `EXPERIMENT_ID` 和 `MANIFEST`，后续使用这份清单比较：
+运行命令保持不变。运行器使用平台构造器、`Algorithm.Solve` 和 `outputFcn`，在问题初始化前设置随机状态，保留 PlatEMO 的 `result`、`metric` 和指标计算；结果保存在独立实验目录。日志输出 `EXPERIMENT_ID` 和 `MANIFEST`，后续使用这份清单比较：
 
 ```text
 python <技能目录>/scripts/parse_results.py --manifest <实验目录>/manifest.json --baseline NSGAII --json <实验目录>/experiment_metrics.json
@@ -108,6 +108,22 @@ python <技能目录>/scripts/parse_results.py --manifest <实验目录>/manifes
 严格比较会再次验证这些证据。SET 历史清单没有诊断，或诊断与参数/权重来源不一致时，即使指标有限也输出 `INSUFFICIENT_EVIDENCE`、退出码 2、`can_iterate=false`，不生成优劣结论。需要重新运行，不能给历史数据伪造证明。其他算法保持原有比较流程，其特殊依赖仍需人工检查。
 
 不要为了通过校验自动把 TRAIN=1 改成 TRAIN=2。用户明确需要纯在线实验时才配置 `[2,GW]`；`not_exercised` 应先检查预算、实际 N、GW 和每 5 代的预测间隔。真实 MATLAB 回归验证见 `tests/test_runtime_runner.m`，使用独立临时目录和小预算，覆盖在线成功、权重降级、短预算以及接口恢复。
+
+## 随机性控制与配对比较
+
+配置可写 `"seeds":[11,22,33]`，长度必须等于 runs，每项为 0–4294967295 的整数且不能重复。不写时自动使用 `[0,1,...,runs-1]`，实际列表保存到配置快照和清单。不同算法、不同版本在相同问题的第 r 次运行使用相同 seed；修改算法后保留整份 seed 列表。
+
+平台 `platemo.m` 会执行 `rng('shuffle')`，覆盖外部 seed。运行器因此直接按平台原有顺序构造问题和算法，再调用 `Algorithm.Solve`，在问题 Setting/GetOptimum/Initialization 之前固定 MATLAB 的 twister 随机流。问题和算法参数仍分别传给对应构造器。批处理结束或失败会恢复调用方的 MATLAB 随机状态。
+
+SET 的临时随机性监测同时设置 Python random、NumPy、PyTorch CPU/CUDA 的随机流，启用确定性运算、关闭 cuDNN benchmark，并提前配置 cuBLAS workspace。无确定性实现时明确失败；CUDA 若已在不兼容配置下初始化，则要求新的 MATLAB 进程。每次记录 `seed`、`randomness.matlab`、`randomness.python` 和配置中的 `seed_policy`，也记录运行器源码 hash。运行结束恢复 Python 随机流和 PyTorch 开关，workspace 配置保留至该 MATLAB 进程结束。
+
+同 seed 的目标是同一环境下相同的搜索结果及 IGD/HV，运行时间和含实验编号的文件 hash 不在重放保证范围内；不同硬件、依赖版本或使用其他随机源的算法需要额外验证。这也是 PyTorch 官方说明中的边界。[PyTorch 随机性说明](https://docs.pytorch.org/docs/stable/notes/randomness.html)
+
+新实验使用按 seed 的配对设计，比较器先按 seed 对齐结果，再执行双侧 Wilcoxon signed-rank 检验，并记录 `method=wilcoxon_signed_rank`、`paired_seeds`。它检验配对差值，需要差值分布对称；全体差值为 0 时返回 p=1。优劣方向来自配对差值的中位数，中位数为 0 时使用带符号秩的方向；最优均值标记仍来自各系列均值。历史目录浏览保留 Mann-Whitney 独立样本检验。[SciPy 配对检验说明](https://docs.scipy.org/doc/scipy/reference/generated/scipy.stats.wilcoxon.html)
+
+seed 集合不同、随机性证据缺失或与配置不符时，严格比较返回退出码 2，禁止自动迭代。历史清单没有 seed 时需重新运行，不能给旧数据补造 seed。少量配对样本仍可能无法检出差异，不得将 p≥α 理解为改动无价值。
+
+真实 MATLAB 验证见 `tests/test_seed_runner.m`：覆盖普通算法同 seed 重放、算法顺序调整、不同 seed 生效、重复 seed 拒绝、SET 模型训练/预测重放和调用方随机状态恢复。使用新的临时输出目录运行。
 
 ## 许可
 

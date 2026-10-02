@@ -2,6 +2,7 @@ classdef SetNSGAIIIRuntime < handle
 % 临时监测 Python 模型和 MATLAB 注入日志，不改变算法的搜索策略。
     properties (Access = private)
         monitor = []
+        randomGuard = []
         logPath
         logOffset = 0
         diagnostics
@@ -12,7 +13,7 @@ classdef SetNSGAIIIRuntime < handle
         gaFallbacks = 0
     end
     methods
-        function obj = SetNSGAIIIRuntime(params,scriptDir,logPath)
+        function obj = SetNSGAIIIRuntime(params,scriptDir,logPath,seed)
             obj.logPath = logPath;
             mode = 1;
             if ~isempty(params), mode = params{1}; end
@@ -34,6 +35,15 @@ classdef SetNSGAIIIRuntime < handle
                 np = py.importlib.import_module('numpy');
                 sp = py.importlib.import_module('scipy');
                 torch = py.importlib.import_module('torch');
+                if nargin >= 4
+                    seedModule = py.importlib.import_module('seed_runtime');
+                    assert(strcmpi(char(java.io.File(char(py.getattr(seedModule,'__file__'))).getCanonicalPath()), ...
+                        char(java.io.File(fullfile(scriptDir,'seed_runtime.py')).getCanonicalPath())), ...
+                        'Seed controller was imported from a different skill directory.');
+                    seedModule = py.importlib.reload(seedModule);
+                    obj.randomGuard = seedModule.RandomStateGuard(torch,int64(seed));
+                    obj.diagnostics.randomness = jsondecode(char(obj.randomGuard.info_json()));
+                end
                 module = py.importlib.import_module('SetTransformer');
                 adapter = py.importlib.import_module('set_nsgaiii_runtime');
                 assert(strcmpi(char(java.io.File(char(py.getattr(module,'__file__'))).getCanonicalPath()), ...
@@ -108,6 +118,10 @@ classdef SetNSGAIIIRuntime < handle
             if ~isempty(obj.monitor)
                 obj.monitor.close();
                 obj.monitor = [];
+            end
+            if ~isempty(obj.randomGuard)
+                obj.randomGuard.close();
+                obj.randomGuard = [];
             end
         end
         function delete(obj)

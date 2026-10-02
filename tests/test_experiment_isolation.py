@@ -34,6 +34,21 @@ def passed_diagnostics(mode=1):
                         "weight_sha256": "fixture-weight" if mode != 2 else None}]}
 
 
+def seed_policy():
+    return {"schema_version": 1, "design": "paired", "matlab_generator": "twister",
+            "entrypoint": "direct_solve", "python_policy": "deterministic-v1"}
+
+
+def randomness(seed, algorithm):
+    result = {"matlab": {"seed": seed, "generator": "twister", "initialized_before_problem": True}}
+    if algorithm == "SET_NSGAIII":
+        result["python"] = {"schema_version": 1, "seed": seed, "python_random": True, "numpy": True,
+                            "torch_cpu": True, "torch_cuda": False, "deterministic_algorithms": True,
+                            "warn_only": False, "cudnn_benchmark": False, "cudnn_deterministic": True,
+                            "cublas_workspace_config": ":4096:8"}
+    return result
+
+
 class ExperimentIsolationTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="platemo-isolation-")
@@ -51,6 +66,8 @@ class ExperimentIsolationTests(unittest.TestCase):
                   "N": 100, "maxFE": 100000, "runs": runs,
                   "metrics": ["IGD", "HV"], "save_count": 6}
         config.update(config_overrides)
+        config.setdefault("seeds", list(range(runs)))
+        config.setdefault("seed_policy", seed_policy())
         sources = [{"path": "fixture.m", "sha256": "fixture-source"}]
         records = []
         for index, algorithm in enumerate(algorithms):
@@ -62,6 +79,8 @@ class ExperimentIsolationTests(unittest.TestCase):
                 result = case / filename
                 savemat(result, {"metric": {"IGD": float(run), "HV": 0.5}})
                 records.append({"experiment_id": name, "algorithm": algorithm["class"], "label": label,
+                                "seed": config["seeds"][run-1],
+                                "randomness": randomness(config["seeds"][run-1], algorithm["class"]),
                                 "algorithm_params": params(algorithm), "algorithm_sources": sources + [
                                     {"path": "fixture.pth", "sha256": "fixture-weight"}],
                                 "problem": "LSMOP1", "problem_params": params(config["problems"][0]),

@@ -42,6 +42,19 @@ function run_platemo_batch(config_path)
     cfg.algorithms = algorithms;
     cfg.problems = problems;
     cfg.metrics = metrics;
+    seeds = 0:runs-1;
+    if isfield(cfg,'seeds')
+        seeds = cfg.seeds;
+        if iscell(seeds), seeds = cell2mat(seeds); end
+    end
+    assert(isnumeric(seeds) && isvector(seeds) && numel(seeds) == runs && ...
+        all(isfinite(seeds)) && all(seeds == fix(seeds)) && ...
+        all(seeds >= 0 & seeds <= 2^32-1) && numel(unique(seeds)) == runs, ...
+        'seeds must contain one unique integer in [0,2^32-1] per run.');
+    seeds = double(seeds(:)');
+    cfg.seeds = num2cell(seeds);
+    cfg.seed_policy = struct('schema_version',1,'design','paired', ...
+        'matlab_generator','twister','entrypoint','direct_solve','python_policy','deterministic-v1');
 
     labels = cellfun(@algorithmLabel, algorithms, 'UniformOutput', false);
     assert(numel(unique(labels)) == numel(labels), ...
@@ -67,7 +80,8 @@ function run_platemo_batch(config_path)
     writeJson(manifest_path,manifest);
 
     old_dir = cd(platemo_dir);
-    guard = onCleanup(@() restoreState(old_dir)); %#ok<NASGU>
+    old_rng = rng;
+    guard = onCleanup(@() restoreState(old_dir,old_rng)); %#ok<NASGU>
     log_path = fullfile(experiment_dir, 'batch_run.log');
     diary(log_path);
 
@@ -90,7 +104,7 @@ function run_platemo_batch(config_path)
         algoSources = classSources(algoName,platemo_dir,true);
         if strcmp(algoName,'SET_NSGAIII')
             algoSources = [algoSources,sourceRecords({fullfile(script_dir,'SetNSGAIIIRuntime.m'), ...
-                fullfile(script_dir,'set_nsgaiii_runtime.py')},platemo_dir)];
+                fullfile(script_dir,'set_nsgaiii_runtime.py'),fullfile(script_dir,'seed_runtime.py')},platemo_dir)];
         end
         for p = 1:numel(problems)
             prob = problems{p};
@@ -113,13 +127,18 @@ function run_platemo_batch(config_path)
                     'label',labels{a}, 'algorithm_params',{specParams(algo)}, ...
                     'algorithm_sources',{algoSources}, 'problem',char(prob.class), ...
                     'problem_params',{specParams(prob)}, 'problem_sources',{probSources}, ...
-                    'problem_index',p, 'run',r, 'requested_N',N, 'maxFE',maxFE);
+                    'problem_index',p, 'run',r, 'requested_N',N, 'maxFE',maxFE,'seed',seeds(r), ...
+                    'randomness',struct('matlab',struct('seed',seeds(r),'generator','twister', ...
+                        'initialized_before_problem',false,'version',version)));
                 try
                     if strcmp(algoName,'SET_NSGAIII')
-                        runtime = SetNSGAIIIRuntime(specParams(algo),script_dir,run_log);
+                        runtime = SetNSGAIIIRuntime(specParams(algo),script_dir,run_log,seeds(r));
                         runtime_guard = onCleanup(@()runtime.close());
                         runtime.ensurePreflight();
                     end
+                    % platemo() 的入口会 rng('shuffle')。在平台构造器运行前固定随机流。
+                    rng(seeds(r),'twister');
+                    info.randomness.matlab.initialized_before_problem = true;
                     output = @(A,P) saveExperimentResult(A,P,case_dir,info,runtime);
                     args = {'algorithm', algoArg, 'problem', probArg, ...
                             'M', M, 'N', N, 'maxFE', maxFE, ...
@@ -127,7 +146,10 @@ function run_platemo_batch(config_path)
                     if isfield(prob, 'D') && ~isempty(prob.D) && double(prob.D) > 0
                         args = [args, {'D', double(prob.D)}]; %#ok<AGROW>
                     end
-                    platemo(args{:});
+                    % 保留平台的 Setting/GetOptimum/Initialization 和 Solve 调用顺序。
+                    Problem = constructObject(probArg,args);
+                    Algorithm = constructObject(algoArg,args);
+                    Algorithm.Solve(Problem);
                     files = dir(fullfile(case_dir,sprintf('*_%d.mat',r)));
                     assert(numel(files) == 1, 'Expected one saved result for run %d, found %d.',r,numel(files));
                     result_path = fullfile(files(1).folder,files(1).name);
@@ -226,6 +248,7 @@ function saveExperimentResult(Algorithm,Problem,folder,info,runtime)
     % 沿用平台的指标计算和 result 结构，仅改变保存位置并补充来源信息。
     if ~isempty(runtime)
         info.runtime_diagnostics = runtime.check(Problem.FE >= Problem.maxFE);
+        info.randomness.python = info.runtime_diagnostics.randomness;
     end
     if Problem.FE < Problem.maxFE
         return;
@@ -255,6 +278,7 @@ function sources = platformSources(root,metrics)
         paths{end+1} = path; %#ok<AGROW>
     end
     sources = sourceRecords(paths,root);
+    sources{end+1} = struct('path','skill/run_platemo_batch.m','sha256',fileHash([mfilename('fullpath') '.m']));
 end
 
 function sources = classSources(name,root,includeWeights)
@@ -365,7 +389,18 @@ function pathOut = resolvePath(pathIn)
     pathOut = fullfile(info(1).folder, info(1).name);
 end
 
-function restoreState(old_dir)
+function obj = constructObject(callable,args)
+    if iscell(callable)
+        constructor = callable{1};
+        args = [args,{'parameter',callable(2:end)}];
+    else
+        constructor = callable;
+    end
+    obj = constructor(args{:});
+end
+
+function restoreState(old_dir,old_rng)
     diary off;
+    rng(old_rng);
     cd(old_dir);
 end

@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""校验 PlatEMO 最终指标，汇总完整实验并做 Wilcoxon rank-sum 对比。"""
+"""校验最终指标与随机性证据，按实验设计选择配对或独立样本检验。"""
 
 import argparse
 import json
@@ -9,7 +9,7 @@ from pathlib import Path
 
 import numpy as np
 from scipy.io import loadmat
-from scipy.stats import mannwhitneyu
+from scipy.stats import mannwhitneyu, rankdata, wilcoxon
 
 from experiment_manifest import experiment_files
 
@@ -158,7 +158,11 @@ def collect(args):
     args.issues = []
     args.group_files = {}
     seen = set()
-    for label, class_name, path in collect_files(args):
+    files = collect_files(args)
+    args.seed_samples = {}
+    record_lookup = {(record['series'], str((Path(experiment['manifest']).parent / record['file']).resolve())): record
+                     for experiment in args.provenance for record in experiment['records']}
+    for label, class_name, path in files:
         match = FILE_RE.match(path.name)
         if not match:
             args.issues.append({"code": "invalid_filename", "file": str(path), "algorithm": label,
@@ -202,6 +206,9 @@ def collect(args):
                 missing += 1
                 continue
             bucket[metric].append(value)
+            record = record_lookup.get((label, str(path.resolve())), {})
+            if type(record.get('seed')) is int:
+                args.seed_samples.setdefault((*key, metric), {})[record['seed']] = value
             hit = True
         if hit:
             used += 1
@@ -240,9 +247,13 @@ def validate_evidence(args, grouped, rows):
     """校验每个问题/指标的样本和 baseline，失败时禁止生成优劣结论。"""
     issues = list(args.issues)
     from set_nsgaiii_runtime import diagnostic_issues
+    from seed_runtime import randomness_issues
+    args.paired = bool(args.provenance)
     for experiment in args.provenance:
+        if not experiment['config'].get('seed_policy'):
+            args.paired = False
         for record in experiment['records']:
-            for issue in diagnostic_issues(record):
+            for issue in diagnostic_issues(record) + randomness_issues(record):
                 issues.append({**issue, 'algorithm': record['series'], 'problem': record['problem'],
                                'M': record['M'], 'D': record['D'], 'run': record['run'],
                                'file': record['file']})
@@ -285,6 +296,13 @@ def validate_evidence(args, grouped, rows):
                 issues.append({"problem": row["problem"], "M": row["M"], "D": row["D"],
                                "algorithm": row["algorithm"], "metric": row["metric"],
                                "code": "invalid_summary", "message": f"Summary {name} is non-finite."})
+    if args.paired:
+        for problem, m_obj, dim in cases:
+            for metric in wanted:
+                seed_sets = {label: set(args.seed_samples.get((problem, m_obj, dim, label, metric), {})) for label in labels}
+                if len({frozenset(seeds) for seeds in seed_sets.values()}) > 1:
+                    issues.append({'code': 'paired_seeds_mismatch', 'problem': problem, 'M': m_obj, 'D': dim,
+                                   'metric': metric, 'message': 'Every series must contain the same seeds for paired comparison.'})
     ready = not issues
     comparison_ready = ready and bool(args.baseline) and len(labels) > 1 and not args.preview
     return {"status": "ready" if ready else "insufficient_evidence", "min_runs": args.min_runs,
@@ -304,7 +322,7 @@ def mark_best(rows):
             row["is_best"] = abs(row["mean"] - best_mean) <= 1e-12
 
 
-def rank_tests(rows, baseline, alpha):
+def rank_tests(rows, baseline, alpha, seed_samples=None):
     if not baseline:
         return []
     by_key = {}
@@ -318,7 +336,17 @@ def rank_tests(rows, baseline, alpha):
         for name, row in algos.items():
             if name == baseline:
                 continue
-            symbol, p_value = compare_samples(row["values"], base["values"], higher_better(metric), alpha)
+            candidate, reference = row['values'], base['values']
+            seeds = None
+            if seed_samples is not None:
+                candidate_by_seed = seed_samples[(problem,m_obj,dim,name,metric)]
+                baseline_by_seed = seed_samples[(problem,m_obj,dim,baseline,metric)]
+                seeds = sorted(candidate_by_seed)
+                if set(seeds) != set(baseline_by_seed):
+                    raise ValueError('Paired comparison requires identical seed sets')
+                candidate = [candidate_by_seed[seed] for seed in seeds]
+                reference = [baseline_by_seed[seed] for seed in seeds]
+            symbol, p_value = compare_samples(candidate, reference, higher_better(metric), alpha, paired=seeds is not None)
             tests.append({
                 "problem": problem,
                 "M": m_obj,
@@ -328,20 +356,37 @@ def rank_tests(rows, baseline, alpha):
                 "baseline": baseline,
                 "symbol": symbol,
                 "p": None if p_value is None else float(p_value),
+                "method": "wilcoxon_signed_rank" if seeds is not None else "mann_whitney_u",
+                "paired_seeds": seeds,
             })
     return tests
 
 
-def compare_samples(candidate, baseline, larger_is_better, alpha):
+def compare_samples(candidate, baseline, larger_is_better, alpha, paired=False):
     if len(candidate) < 2 or len(baseline) < 2:
         return "na", None
     if np.allclose(candidate, candidate[0]) and np.allclose(baseline, baseline[0]) and candidate[0] == baseline[0]:
         return "=", 1.0
-    result = mannwhitneyu(candidate, baseline, alternative="two-sided", method="auto")
+    if paired:
+        if len(candidate) != len(baseline):
+            raise ValueError('Paired samples must have equal lengths')
+        difference = np.asarray(candidate) - np.asarray(baseline)
+        if not np.any(difference):
+            return '=', 1.0
+        result = wilcoxon(difference, alternative='two-sided', zero_method='pratt', method='auto')
+    else:
+        result = mannwhitneyu(candidate, baseline, alternative="two-sided", method="auto")
     p_value = float(result.pvalue)
     if p_value >= alpha:
         return "=", p_value
-    candidate_better = np.median(candidate) > np.median(baseline) if larger_is_better else np.median(candidate) < np.median(baseline)
+    if paired:
+        direction = np.median(difference)
+        if direction == 0:
+            # 大量零差值可能令中位数为 0，用 signed-rank 方向避免把 HV 改善标为退步。
+            direction = np.sum(np.sign(difference) * rankdata(np.abs(difference)))
+        candidate_better = direction > 0 if larger_is_better else direction < 0
+    else:
+        candidate_better = np.median(candidate) > np.median(baseline) if larger_is_better else np.median(candidate) < np.median(baseline)
     return ("+" if candidate_better else "-"), p_value
 
 
@@ -380,7 +425,8 @@ def render_table(rows, tests, preview=False):
     if preview:
         lines.append("PREVIEW ONLY: available statistics; no ranking or significance conclusion. Not valid for iteration.")
     else:
-        lines.append("* = best mean in the row. + better / - worse / = no significant difference vs baseline (Mann-Whitney, two-sided).")
+        method = 'Wilcoxon signed-rank, paired by seed' if tests and tests[0]['method'] == 'wilcoxon_signed_rank' else 'Mann-Whitney, independent samples'
+        lines.append(f"* = best mean in the row. + better / - worse / = no significant difference vs baseline ({method}, two-sided).")
     return "\n".join(lines)
 
 
@@ -412,7 +458,7 @@ def main():
     tests = []
     if validation["status"] == "ready" and not args.preview:
         mark_best(rows)
-        tests = rank_tests(rows, args.baseline, args.alpha)
+        tests = rank_tests(rows, args.baseline, args.alpha, args.seed_samples if args.paired else None)
         print(render_table(rows, tests))
     elif args.preview and rows:
         print(render_table(rows, [], preview=True))
