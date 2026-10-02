@@ -55,6 +55,24 @@ function run_platemo_batch(config_path)
     cfg.seeds = num2cell(seeds);
     cfg.seed_policy = struct('schema_version',1,'design','paired', ...
         'matlab_generator','twister','entrypoint','direct_solve','python_policy','deterministic-v1');
+    planText = '';
+    if isfield(cfg,'iteration_plan')
+        planSpec = cfg.iteration_plan;
+        if isstruct(planSpec), planPath = char(planSpec.path); else, planPath = char(planSpec); end
+        if ~java.io.File(planPath).isAbsolute()
+            planPath = fullfile(fileparts(config_path),planPath);
+        end
+        planPath = resolvePath(planPath);
+        planText = fileread(planPath);
+        plan = jsondecode(planText);
+        assert(plan.schema_version == 1 && strcmp(plan.kind,'iteration_plan'), ...
+            'Unsupported iteration plan. Use decide_iteration.py prepare first.');
+        planHash = fileHash(planPath);
+        if isstruct(planSpec)
+            assert(strcmp(planHash,planSpec.sha256),'Iteration plan changed since config snapshot.');
+        end
+        cfg.iteration_plan = struct('path',planPath,'sha256',planHash);
+    end
 
     labels = cellfun(@algorithmLabel, algorithms, 'UniformOutput', false);
     assert(numel(unique(labels)) == numel(labels), ...
@@ -77,6 +95,13 @@ function run_platemo_batch(config_path)
         'platform_sources',{platformSources(platemo_dir,metrics)}, ...
         'expected_runs',numel(algorithms)*numel(problems)*runs, 'records',{{}});
     writeJson(fullfile(experiment_dir,'config.json'),cfg);
+    if ~isempty(planText)
+        % 原样复制已锁定的方案字节，避免重新编码导致 hash 改变。
+        [ok,msg] = copyfile(cfg.iteration_plan.path,fullfile(experiment_dir,'iteration_plan.json'));
+        assert(ok,'Cannot snapshot iteration plan: %s',msg);
+        assert(strcmp(fileHash(fullfile(experiment_dir,'iteration_plan.json')),cfg.iteration_plan.sha256), ...
+            'Iteration plan changed while snapshotting.');
+    end
     writeJson(manifest_path,manifest);
 
     old_dir = cd(platemo_dir);

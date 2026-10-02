@@ -125,6 +125,18 @@ seed 集合不同、随机性证据缺失或与配置不符时，严格比较返
 
 真实 MATLAB 验证见 `tests/test_seed_runner.m`：覆盖普通算法同 seed 重放、算法顺序调整、不同 seed 生效、重复 seed 拒绝、SET 模型训练/预测重放和调用方随机状态恢复。使用新的临时输出目录运行。
 
+## 迭代的保留、回退与证据不足
+
+新增 `decide_iteration.py`，把“改善不足就回退”替换为预登记的三态判断。修改算法前通过 `prepare` 锁定主指标、最低改善幅度、受保护指标的退步容限、需改善的问题比例、最少重复次数和 α，同时绑定旧清单、完整问题集及 seed 列表。候选配置填写 `iteration_plan`，运行器在仿真前保存方案原文与 hash，防止事后调整标准。
+
+候选完成后用 `evaluate` 重新检查新旧清单与结果。按 seed 计算改善量，并使用移动门槛后的单侧 Wilcoxon 检验；对本轮全部问题、指标和方向共同做 Holm 校正。
+
+- `keep`：主指标达到预设改善目标，且完整问题集的所有受保护指标都有证据处于退步容限内。
+- `revert`：任一问题/指标的退步有证据超过容限，即使另一指标改善也建议回退。
+- `insufficient_evidence`：数据不完整、方案不匹配或检验能力不足等；候选待定，不能因为“不显著”自动回退。
+
+`can_iterate` 仍只表示比较数据有效；新的 `can_apply` 才表示可执行保留/回退建议。脚本不改源码。配置示例中的数字仅说明格式，不会自动成为默认标准。使用方式、假设限制和报告字段见 [迭代判断规则](.agents/skills/platemo/references/iteration-decisions.md)，规则示例见 [iteration_policy.example.json](.agents/skills/platemo/assets/iteration_policy.example.json)。多轮调参后仍需独立留出实验验证。
+
 ## 许可
 
 技能文本和 `scripts/` 使用 MIT 许可证，见 `LICENSE`。

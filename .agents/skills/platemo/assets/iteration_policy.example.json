@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "primary_metric": "IGD",
+  "metrics": {
+    "IGD": {"scale": "relative", "min_improvement": 0.01, "max_regression": 0.01},
+    "HV": {"scale": "relative", "max_regression": 0.01}
+  },
+  "required_improved_fraction": 0.5,
+  "min_runs": 10,
+  "alpha": 0.05
+}
