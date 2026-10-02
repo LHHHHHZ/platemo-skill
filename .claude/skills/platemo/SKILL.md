@@ -18,6 +18,7 @@ license: MIT
 - `--problems`：逗号分隔的问题类名。
 - `--M`、`--D`、`--N`、`--maxFE`、`--runs`、`--metrics`、`--baseline`、`--config`。
 - 比较已有实验时提供 `manifest.json` 路径；比较多个版本时为每份清单指定不同的实验标签。
+- 比较可用 `--min-runs` 提高每项指标所需的有效运行数，默认 2；`--preview` 只用于诊断预览。
 
 算法和问题都用 `classdef` 后面的类名，不要用文件夹名。`NSGA-III` 文件夹里的类是 `NSGAIII`，`MOEA/D` 是 `MOEAD`。不确定时搜索 `classdef`。
 
@@ -110,22 +111,28 @@ matlab -batch "cd('<PLATEMO>'); addpath('<SCRIPTS>'); run_platemo_batch('<CONFIG
 <PY> <SCRIPTS>/parse_results.py --experiment "old=<OLD>/manifest.json" --experiment "new=<NEW>/manifest.json" --metrics IGD,HV --baseline old/SET_NSGAIII --json <NEW>/iteration_metrics.json
 ```
 
-向用户报告每个问题、每个指标的 `mean +/- std` 和 `n`，并带上 M、D。`*` 是该行均值最优。IGD、GD 越小越好；HV 越大越好。`+`、`-`、`=` 是相对 baseline 的双侧 Mann-Whitney 检验，默认 α=0.05。`na` 表示任一侧少于 2 次运行。runs 小于 5 时说明显著性只能当线索。按问题指出落后的位置，不要只报一个平均名次。
+比较默认严格校验：每个结果必须包含所有请求的指标；最终指标必须是有限实数，且每项指标至少有 `--min-runs` 次有效运行（默认 2，不能设为 1）。只取指标序列的最后一项；最后一项是 NaN/Inf 时，不用早期有效值替代。同一张比较表中的系列必须覆盖相同的问题 M/D，指定 baseline 时它必须覆盖每个问题和每个指标。
+
+无效最终指标、缺失指标、缺失 baseline、有效样本不足、无法读取的文件或重复运行，会返回退出码 2，输出 `INSUFFICIENT_EVIDENCE`，不生成最优标记或显著性检验。指定 `--json` 时失败也生成诊断报告，覆盖旧报告。报告中 `status=insufficient_evidence`、`can_iterate=false`，`validation.issues` 列出原因、相关文件和运行编号；`validation.groups` 给出每项指标的有效次数。不要据此判优劣、修改算法或自动回退；先报告缺失/无效位置，再补齐或重新运行实验。
+
+只想查看可用的部分数据时加 `--preview`。预览不显示最优标记、不做显著性检验，`can_iterate` 始终为 false；数据不足时仍返回退出码 2。仅 1 次有效样本时，std 显示 n/a（JSON 为 null）。不要把预览用于 iterate。
+
+有效比较向用户报告每个问题、每个指标的 `mean +/- std` 和 `n`，并带上 M、D。`*` 是该行均值最优。IGD、GD 越小越好；HV 越大越好。`+`、`-`、`=` 是相对 baseline 的双侧 Mann-Whitney 检验，默认 α=0.05；`=` 表示未发现显著差异，不表示两者等价。最少 2 次是数据门槛，不保证统计检验有足够能力。runs 小于 5 时说明显著性只能当线索。按问题指出落后的位置，不要只报一个平均名次。
 
 清单模式会检查实验完成状态、运行成员、结果文件 SHA-256，以及相同问题 M/D 下的 N、maxFE、save_count、问题参数、问题源码和平台/指标源码是否一致。协议不一致时停止比较；算法参数和算法源码可以不同，这是算法或版本对比的目的。实际 N、FE、算法目录源码和已有预训练权重的 hash 保存在来源记录中，JSON 报告包含所用清单和记录。
 
 没有清单的历史数据，仅在用户明确要浏览历史结果时使用 `--data-dir ... --allow-legacy` 或 `--series ... --allow-legacy`，并说明预算、参数和版本未验证。不要把这种汇总用于 iterate，也不要伪造清单给旧文件补上未知来源。
 
-`files_used` 为 0 或缺少请求的指标时，这些 `.mat` 不是用 `save>0` 和 `metName` 生成的。不要自己用目标值临时估算 IGD 或 HV。
+诊断显示指标缺失时，检查是否以 `save>0` 和相应 `metName` 保存；最终指标无效时，检查仿真和指标计算。不要自己用目标值临时估算 IGD/HV，也不要删掉无效运行来让比较通过。
 
 ## iterate
 
 只做一轮，然后停下来等用户决定。被修改的算法是用户点名的那个；没点名时，是这次对比中准备改进的那个。
 
-1. 先完整做一次 compare。没有可用指标就停止。
+1. 先完整做一次严格 compare，指定 baseline。仅退出码 0 且 JSON 中 `can_iterate=true` 时继续；这是数据完整性门槛，仍需检查 run 的依赖降级日志。`insufficient_evidence`、预览或无 baseline 的统计摘要都不能用于修改算法。
 2. 只把落后的问题当成修改依据。用 `classdef` 定位该类的 `.m`，只在需要时读同目录里的辅助文件。不要顺手重构，也不要改别的算法。
 3. 记录旧实验清单路径，把准备修改的源文件复制到 `<OLD>/source_backup/<yyyyMMdd-HHmmss>/`。旧实验结果目录保持原样，无需再复制整个 Data。源码备份失败就不要修改或重跑。
 4. 只改一个机制或一个明确的 bug。说明改了什么、期望哪些问题变好、什么结果算退步。
 5. 用相同实验配置再走 run。若原配置有显式 experiment_id，仅删除或更换该字段以建立新实验。不要顺便换算法、问题、D 或 maxFE。记录新清单路径。
-6. 用 `--experiment old=... --experiment new=...` 把修改前、新结果和配置里的基线放在同一张表里。改进不足或落后问题变多时，用源文件备份恢复源码，并说明已回退。两个实验及其清单都保留，回退源码不改变历史结果的归属。
+6. 用 `--experiment old=... --experiment new=...` 把修改前、新结果和配置里的基线放在同一张表里。先检查比较退出码及 can_iterate；证据不足时停止优劣判断并报告原因，不自动以“变差”为由回退。比较有效后，改进不足或落后问题变多时，用源文件备份恢复源码，并说明已回退。两个实验及其清单都保留，回退源码不改变历史结果的归属。
 7. 给出改动、保留还是回退、哪些问题变好或变差，以及下一轮只值得试什么。不要自动开始下一轮。

@@ -59,6 +59,33 @@ python <技能目录>/scripts/parse_results.py --experiment "old=<旧实验>/man
 
 旧的 `--data-dir` 和 `--series` 模式保留，但必须显式加 `--allow-legacy`，输出会提示来源未验证，仅用于浏览历史数据，不作为自动迭代依据。
 
+## 指标有效性与证据不足
+
+比较默认严格校验最终指标：取序列最后一项，最后一项为 NaN/Inf 时不回退到早期值。缺失指标、无效最终值、无法读取的文件、重复运行或 baseline 未覆盖全部问题/指标时，拒绝生成优劣结论。每个请求指标至少需要 2 次有效运行；可通过 `--min-runs 5` 等选项提高门槛，最低不能小于 2。这个门槛不保证统计检验有足够能力。
+
+数据有效时退出码为 0；证据不足时退出码为 2，并输出 `INSUFFICIENT_EVIDENCE`。指定 `--json` 后，即使比较失败也会写入诊断报告，避免误读旧的成功报告：
+
+```json
+{
+  "status": "insufficient_evidence",
+  "comparison_ready": false,
+  "can_iterate": false,
+  "validation": {
+    "issues": [{"code": "invalid_final_metric", "algorithm": "SET_NSGAIII", "problem": "LSMOP1", "metric": "IGD", "run": 2}]
+  }
+}
+```
+
+报告还包含每组的预期运行数和各指标有效次数。只有完整、有效、有 baseline 的清单比较才能给出 `can_iterate=true`；单算法摘要、历史目录浏览和预览都不能用于自动迭代。`can_iterate` 是数据门槛，仍需检查算法依赖是否降级，及改动本身是否值得保留。
+
+需要排查部分数据时，可以预览：
+
+```text
+python <技能目录>/scripts/parse_results.py --manifest <实验目录>/manifest.json --preview --json <实验目录>/diagnostics.json
+```
+
+预览会显示可用数据的统计摘要，但不标记最优、不做显著性检验，`can_iterate` 始终为 false；数据不足时仍返回退出码 2。只有 1 次样本时，标准差显示 n/a，JSON 中为 null。
+
 回归测试：`python -m unittest discover -s tests -p "test_*.py" -v`。真实 MATLAB 保存验证位于 `tests/test_batch_runner.m`，传入平台目录和新建的临时输出目录后执行，只使用小预算。
 
 ## 许可

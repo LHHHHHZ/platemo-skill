@@ -187,6 +187,7 @@ class ExperimentIsolationTests(unittest.TestCase):
         folder = self.root / "legacy" / "SET_NSGAIII"
         folder.mkdir(parents=True)
         savemat(folder / "SET_NSGAIII_LSMOP1_M3_D500_1.mat", {"metric": {"IGD": 1.0, "HV": 0.5}})
+        savemat(folder / "SET_NSGAIII_LSMOP1_M3_D500_2.mat", {"metric": {"IGD": 2.0, "HV": 0.6}})
         denied = self.cli("--data-dir", folder.parent)
         self.assertNotEqual(denied.returncode, 0)
         self.assertIn("--allow-legacy", denied.stderr)

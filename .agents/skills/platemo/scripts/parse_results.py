@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""读取 PlatEMO Data 目录中的 .mat，汇总最终指标并做 Wilcoxon rank-sum 对比。"""
+"""校验 PlatEMO 最终指标，汇总完整实验并做 Wilcoxon rank-sum 对比。"""
 
 import argparse
 import json
@@ -49,7 +49,19 @@ def parse_args():
     parser.add_argument("--problems", default="", help="Comma-separated problem class names to keep")
     parser.add_argument("--json", dest="json_path", type=Path, help="Also write machine-readable JSON")
     parser.add_argument("--alpha", type=float, default=0.05)
-    return parser.parse_args()
+    parser.add_argument("--min-runs", type=int, default=2,
+                        help="Minimum valid runs for every requested metric (at least 2)")
+    parser.add_argument("--preview", action="store_true",
+                        help="Show available statistics without ranking, testing or enabling iteration")
+    args = parser.parse_args()
+    if args.min_runs < 2:
+        parser.error("--min-runs must be at least 2")
+    if not 0 < args.alpha < 1:
+        parser.error("--alpha must be between 0 and 1")
+    metrics = split_csv(args.metrics)
+    if not metrics or len(set(metrics)) != len(metrics):
+        parser.error("--metrics must contain unique, non-empty names")
+    return args
 
 
 def split_csv(text):
@@ -83,11 +95,17 @@ def metric_dict(path):
 
 
 def final_value(raw):
-    values = np.asarray(raw, dtype=float).reshape(-1)
-    values = values[np.isfinite(values)]
-    if values.size == 0:
+    # 只检查序列最后一项；中途有效值不能代替无效的最终结果。
+    values = np.asarray(raw)
+    if values.dtype.kind not in "fiu" or values.ndim > 2:
         return None
-    return float(values[-1])
+    if values.ndim == 2 and min(values.shape) > 1:
+        return None
+    values = values.reshape(-1)
+    if values.size == 0 or not np.isfinite(values[-1]):
+        return None
+    value = float(values[-1])
+    return value if np.isfinite(value) else None
 
 
 def collect_files(args):
@@ -137,9 +155,14 @@ def collect(args):
     used = 0
     skipped = 0
     missing = 0
+    args.issues = []
+    args.group_files = {}
+    seen = set()
     for label, class_name, path in collect_files(args):
         match = FILE_RE.match(path.name)
         if not match:
+            args.issues.append({"code": "invalid_filename", "file": str(path), "algorithm": label,
+                                "message": "Cannot identify problem, dimensions and run number."})
             skipped += 1
             continue
         body = match.group("body")
@@ -148,20 +171,34 @@ def collect(args):
         if problems and problem not in problems:
             continue
         key = (problem, int(match.group("M")), int(match.group("D")), label)
+        context = {"file": str(path), "algorithm": label, "problem": problem,
+                   "M": key[1], "D": key[2], "run": int(match.group("run"))}
+        args.group_files.setdefault(key, []).append(str(path))
+        bucket = grouped.setdefault(key, {metric: [] for metric in wanted})
+        identity = (*key, context["run"])
+        if identity in seen:
+            args.issues.append({**context, "code": "duplicate_run", "message": "Run number occurs more than once."})
+            skipped += 1
+            continue
+        seen.add(identity)
         try:
             fields = metric_dict(path)
         except Exception as exc:  # noqa: BLE001 - 单个坏文件不应中断整表
             print(f"WARNING: {path.name}: {exc}", file=sys.stderr)
+            args.issues.append({**context, "code": "unreadable_result", "message": str(exc)})
             skipped += 1
             continue
-        bucket = grouped.setdefault(key, {metric: [] for metric in wanted})
         hit = False
         for metric in wanted:
             if metric not in fields:
+                args.issues.append({**context, "metric": metric, "code": "missing_metric",
+                                    "message": "Requested metric is not saved in this result."})
                 missing += 1
                 continue
             value = final_value(fields[metric])
             if value is None:
+                args.issues.append({**context, "metric": metric, "code": "invalid_final_metric",
+                                    "message": "Final metric is non-finite, empty, non-numeric or not a scalar/vector."})
                 missing += 1
                 continue
             bucket[metric].append(value)
@@ -171,6 +208,7 @@ def collect(args):
         else:
             skipped += 1
     print(f"files_used={used} files_skipped={skipped} missing_metric_fields={missing}", file=sys.stderr)
+    args.file_stats = {"files_used": used, "files_skipped": skipped, "missing_metric_fields": missing}
     return grouped
 
 
@@ -189,13 +227,63 @@ def summarize(grouped):
                 "algorithm": algorithm,
                 "n": int(arr.size),
                 "mean": float(arr.mean()),
-                "std": float(arr.std(ddof=1)) if arr.size > 1 else 0.0,
+                "std": float(arr.std(ddof=1)) if arr.size > 1 else None,
                 "median": float(np.median(arr)),
                 "best": float(arr.max() if higher_better(metric) else arr.min()),
                 "worst": float(arr.min() if higher_better(metric) else arr.max()),
                 "values": arr.tolist(),
             })
     return rows
+
+
+def validate_evidence(args, grouped, rows):
+    """校验每个问题/指标的样本和 baseline，失败时禁止生成优劣结论。"""
+    issues = list(args.issues)
+    groups = []
+    wanted = split_csv(args.metrics)
+    labels = {key[3] for key in grouped}
+    cases = {key[:3] for key in grouped}
+    if not rows:
+        issues.append({"code": "no_valid_metrics", "message": "No valid final metric values were found."})
+    for (problem, m_obj, dim, label), values in grouped.items():
+        context = {"algorithm": label, "problem": problem, "M": m_obj, "D": dim}
+        counts = {metric: len(values[metric]) for metric in wanted}
+        groups.append({**context, "expected_runs": len(args.group_files[(problem, m_obj, dim, label)]),
+                       "valid_runs": counts})
+        for metric, count in counts.items():
+            if count < args.min_runs:
+                issues.append({**context, "metric": metric, "code": "insufficient_runs",
+                               "message": f"Only {count} valid runs; at least {args.min_runs} are required."})
+    # baseline 必须覆盖每个问题及每个请求的指标，不能只在其他问题上存在。
+    for problem, m_obj, dim in sorted(cases):
+        context = {"problem": problem, "M": m_obj, "D": dim}
+        if args.baseline and args.baseline not in labels:
+            issues.append({**context, "algorithm": args.baseline, "code": "baseline_missing",
+                           "message": "Requested baseline has no selected results."})
+        for label in sorted(labels):
+            key = (problem, m_obj, dim, label)
+            if key not in grouped:
+                code = "baseline_missing" if label == args.baseline else "series_missing"
+                issues.append({**context, "algorithm": label, "code": code,
+                               "message": "Series does not cover this problem and dimension combination."})
+            elif label == args.baseline:
+                for metric in wanted:
+                    if not grouped[key][metric]:
+                        issues.append({**context, "algorithm": label, "metric": metric,
+                                       "code": "baseline_metric_missing", "message": "Baseline has no valid final metric."})
+    for row in rows:
+        for name in ("mean", "std", "median", "best", "worst"):
+            if row[name] is not None and not np.isfinite(row[name]):
+                row[name] = None
+                issues.append({"problem": row["problem"], "M": row["M"], "D": row["D"],
+                               "algorithm": row["algorithm"], "metric": row["metric"],
+                               "code": "invalid_summary", "message": f"Summary {name} is non-finite."})
+    ready = not issues
+    comparison_ready = ready and bool(args.baseline) and len(labels) > 1 and not args.preview
+    return {"status": "ready" if ready else "insufficient_evidence", "min_runs": args.min_runs,
+            "preview": args.preview, "issues": issues, "groups": groups,
+            "comparison_ready": comparison_ready,
+            "can_iterate": comparison_ready and bool(args.provenance), **args.file_stats}
 
 
 def mark_best(rows):
@@ -250,7 +338,7 @@ def compare_samples(candidate, baseline, larger_is_better, alpha):
     return ("+" if candidate_better else "-"), p_value
 
 
-def render_table(rows, tests):
+def render_table(rows, tests, preview=False):
     lookup = {(t["problem"], t["M"], t["D"], t["metric"], t["algorithm"]): t for t in tests}
     algorithms = sorted({row["algorithm"] for row in rows}, key=natural_key)
     header = ["Problem", "Metric"] + algorithms
@@ -272,15 +360,20 @@ def render_table(rows, tests):
                 cells.append("-")
                 symbols.append("")
                 continue
-            star = "*" if match["is_best"] else ""
-            cells.append(f"{match['mean']:.4e} +/- {match['std']:.2e} (n={match['n']}){star}")
+            star = "*" if match.get("is_best", False) and not preview else ""
+            mean = f"{match['mean']:.4e}" if match["mean"] is not None else "n/a"
+            std = f"{match['std']:.2e}" if match["std"] is not None else "n/a"
+            cells.append(f"{mean} +/- {std} (n={match['n']}){star}")
             test = lookup.get((problem, m_obj, dim, metric, name))
             symbols.append(test["symbol"] if test else "")
         if tests:
             cells.append(" ".join(f"{name}:{symbol}" for name, symbol in zip(algorithms, symbols) if symbol))
         lines.append(" | ".join(cells))
     lines.append("")
-    lines.append("* = best mean in the row. + better / - worse / = no difference vs baseline (Mann-Whitney, two-sided). na = fewer than 2 runs.")
+    if preview:
+        lines.append("PREVIEW ONLY: available statistics; no ranking or significance conclusion. Not valid for iteration.")
+    else:
+        lines.append("* = best mean in the row. + better / - worse / = no significant difference vs baseline (Mann-Whitney, two-sided).")
     return "\n".join(lines)
 
 
@@ -292,22 +385,47 @@ def public_row(row):
 
 def main():
     args = parse_args()
+    args.provenance = []
+    args.issues = []
+    args.group_files = {}
+    args.file_stats = {"files_used": 0, "files_skipped": 0, "missing_metric_fields": 0}
     for metric in split_csv(args.metrics):
         higher_better(metric)
-    grouped = collect(args)
-    rows = summarize(grouped)
-    if not rows:
-        print("No metric values found. Runs must use save>0 and metName.", file=sys.stderr)
-        return 2
-    mark_best(rows)
-    tests = rank_tests(rows, args.baseline, args.alpha)
-    print(render_table(rows, tests))
+    try:
+        grouped = collect(args)
+        with np.errstate(over="ignore", invalid="ignore"):
+            rows = summarize(grouped)
+        validation = validate_evidence(args, grouped, rows)
+    except SystemExit as exc:
+        code = "baseline_missing" if str(exc).startswith("Baseline is not") else "source_validation_failed"
+        rows = []
+        validation = {"status": "insufficient_evidence", "min_runs": args.min_runs, "preview": args.preview,
+                      "issues": [{"code": code, "message": str(exc)}], "groups": [],
+                      "comparison_ready": False, "can_iterate": False, **args.file_stats}
+    tests = []
+    if validation["status"] == "ready" and not args.preview:
+        mark_best(rows)
+        tests = rank_tests(rows, args.baseline, args.alpha)
+        print(render_table(rows, tests))
+    elif args.preview and rows:
+        print(render_table(rows, [], preview=True))
+    if validation["issues"]:
+        print("INSUFFICIENT_EVIDENCE: no ranking, significance test or automatic iteration is allowed.", file=sys.stderr)
+        for issue in validation["issues"]:
+            location = " ".join(str(issue[key]) for key in ("algorithm", "problem", "metric", "file") if key in issue)
+            print(f"{issue['code']}: {location}: {issue['message']}", file=sys.stderr)
+    print(f"VALIDATION_STATUS={validation['status']} CAN_ITERATE={str(validation['can_iterate']).lower()}", file=sys.stderr)
     if args.json_path:
         payload = {"rows": [public_row(row) for row in rows], "tests": tests, "alpha": args.alpha,
-                   "provenance_verified": bool(args.provenance), "experiments": args.provenance}
-        args.json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+                   "provenance_verified": bool(args.provenance), "experiments": args.provenance,
+                   "status": validation["status"], "comparison_ready": validation["comparison_ready"],
+                   "can_iterate": validation["can_iterate"], "validation": validation}
+        # 失败也写诊断报告，覆盖可能存在的旧成功报告，且不输出 NaN/Infinity JSON。
+        temporary = args.json_path.with_name(args.json_path.name + ".tmp")
+        temporary.write_text(json.dumps(payload, indent=2, allow_nan=False), encoding="utf-8")
+        temporary.replace(args.json_path)
         print(f"json={args.json_path}", file=sys.stderr)
-    return 0
+    return 0 if validation["status"] == "ready" else 2
 
 
 if __name__ == "__main__":
