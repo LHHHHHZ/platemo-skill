@@ -1,4 +1,4 @@
-function test_runtime_runner(platemoRoot,outputRoot)
+function test_adapter_runtime_runner(platemoRoot,outputRoot)
 % 小预算真实验证：模型注入、权重降级、短预算，以及普通算法保存。
     assert(isfolder(outputRoot),'Create a fresh output directory first.');
     cd(platemoRoot);

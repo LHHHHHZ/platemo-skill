@@ -186,3 +186,27 @@ def diagnostic_issues(record):
     except (KeyError, TypeError, ValueError) as exc:
         return [{"code": "runtime_mechanism_invalid", "message": str(exc)}]
     return []
+
+
+def external_randomness_issues(record):
+    try:
+        seed = record["seed"]
+        py = record["randomness"]["python"]
+        if (py["seed"] != seed or not all(py[key] is True for key in
+                ("python_random", "numpy", "torch_cpu", "deterministic_algorithms", "cudnn_deterministic"))
+                or py["warn_only"] is not False or py["cudnn_benchmark"] is not False
+                or py["cublas_workspace_config"] not in (":4096:8", ":16:8")):
+            raise ValueError("SET Python random states or deterministic execution were not verified")
+        models = record["runtime_diagnostics"].get("models", [])
+        if isinstance(models, dict):
+            models = [models]
+        for model in models:
+            if str(model.get("device", "")).startswith("cuda") and py["torch_cuda"] is not True:
+                raise ValueError("CUDA random state was not seeded")
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+        return [{'code': 'randomness_unverified', 'message': str(exc)}]
+    return []
+
+
+def validate(record):
+    return diagnostic_issues(record) + external_randomness_issues(record)

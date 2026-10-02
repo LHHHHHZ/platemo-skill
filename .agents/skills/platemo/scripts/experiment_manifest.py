@@ -47,10 +47,11 @@ def load_manifest(path):
                     or len(set(seeds)) != len(seeds)):
                 raise ValueError("seeds must contain one unique uint32 integer per run")
             policy = cfg.get("seed_policy", {})
-            if (not isinstance(policy, dict) or policy.get("schema_version") != 1
+            if (not isinstance(policy, dict) or policy.get("schema_version") not in (1, 2)
                     or policy.get("design") != "paired" or policy.get("entrypoint") != "direct_solve"
                     or policy.get("matlab_generator") != "twister"
-                    or policy.get("python_policy") != "deterministic-v1"):
+                    or (policy.get('schema_version') == 1 and policy.get("python_policy") != "deterministic-v1")
+                    or (policy.get('schema_version') == 2 and policy.get('external_policy') != 'adapter-defined')):
                 raise ValueError("Unsupported or missing seed_policy")
         algorithms = cfg["algorithms"]
         problems = cfg["problems"]

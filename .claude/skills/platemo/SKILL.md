@@ -1,155 +1,80 @@
 ---
 name: platemo
-description: "Run or compare PlatEMO experiments and iterate one algorithm from IGD/HV. Use for PlatEMO, LSMOP, SMOP, LSCM, or batch multi-objective runs. 在 PlatEMO 上批量运行算法、对比指标并迭代算法。"
+description: "Run, compare, and assist one iteration of multi-objective optimization experiments on PlatEMO. Use for PlatEMO batch simulations, experiment metrics, reproducible comparisons, and algorithm iteration. 在 PlatEMO 上批量仿真、比较多目标优化实验并辅助迭代算法。"
 license: MIT
 ---
 
-用用户正在使用的语言回复。日志和命令保持英文。
+用用户正在使用的语言回复，命令和日志保持英文。面向已安装的 PlatEMO 算法，不预设用户研究某个算法或问题族。基础环境是 MATLAB R2019a+ 和装有 NumPy、SciPy 的 Python，特殊依赖按适配器加载。
 
-需要 MATLAB R2019a+，以及安装 numpy、scipy 的 Python。配套脚本在本文件旁的 `scripts/` 目录。
+## 识别任务
 
-运行 `SET_NSGAIII` 时需要支持 `pyenv` 的 MATLAB（R2019b+），以及该算法 `.venv/Scripts/python.exe` 中的 numpy、scipy、torch。结果解析所用的 `<PY>` 可以是另一解释器；仅在 `<PY>` 中安装依赖不能证明 MATLAB 的算法依赖可用。
+- run：运行实验；compare：分析已有数据；iterate：用户明确要求时修改目标算法并评估一轮。
+- 支持用户指定 algorithms、problems、M、D、N、maxFE、runs、metrics、baseline、seeds、config 和 quick/standard/full。
+- 用户配置优先。未点名算法时询问，不默认指定某一算法。问题族不明确时先明确研究目标，按 [测试集与预算](references/benchmarks.md) 选择，不自动转为大规模问题。
+- 用 classdef 确定类名，文件夹名可能不同；检查编码、目标数、约束支持及问题参数，不能把类已安装当作所有组合均兼容。
+- 参数从类的 ParameterSet 和头部注释核实；没有覆盖要求时用 params: []。同类的不同配置写唯一 label，baseline 使用 label。
+- 当前主要覆盖静态多目标优化。单目标、多任务、动态或其他特殊协议先核对终止、结果保存和指标含义，不宣称全面支持。
 
-这个技能驱动 PlatEMO 实验：批量运行任意已安装算法，按实验清单读取指标，判断优劣，并在用户要求迭代时只改被点名的那个算法。默认测试集是大规模多目标问题。不要启动无参数的 `platemo()`，那会打开 GUI。
+## 路径与配置
 
-调用技能时用户给出的文字里可以有：
+- `<PLATEMO>` 是包含 platemo.m 的目录，发行包可能多一层 PlatEMO/；也可设置 PLATEMO_ROOT。
+- `<SCRIPTS>` 是本文件旁的 scripts/；`<PY>` 是结果解析解释器。算法所用解释器由适配器另行核对，不能混为一谈。
+- 每次 run 新建 Experiments/<experiment_id>/，保存 config、manifest、日志和独立 Data。已存在的编号拒绝覆盖，不删除旧目录复用编号。
+- experiment_root 可覆盖输出根目录，相对路径以配置文件目录为基准。每轮使用独立配置文件，避免覆盖其他任务配置。
+- 新结果按 manifest 收集，不扫描平台旧 Data。
 
-- 子命令：`run`、`compare`、`iterate`。没写时，要跑实验用 `run`，只看已有数据用 `compare`。
-- `--quick` / `--standard` / `--full`：只决定测试集和预算。显式选项覆盖预设。
-- `--algorithms`：逗号分隔的类名。没有就问，不要默认成某一个算法。
-- `--problems`：逗号分隔的问题类名。
-- `--M`、`--D`、`--N`、`--maxFE`、`--runs`、`--metrics`、`--baseline`、`--config`。
-- `--seeds`：逗号分隔的整数列表，写入配置的 seeds，长度必须等于 runs，不能重复。
-- 比较已有实验时提供 `manifest.json` 路径；比较多个版本时为每份清单指定不同的实验标签。
-- 比较可用 `--min-runs` 提高每项指标所需的有效运行数，默认 2；`--preview` 只用于诊断预览。
+必填字段为 algorithms、problems、N、maxFE、runs、metrics、save_count。问题指定 class、M，可选 D、params；D 省略或为 0 时用问题默认值。save_count 必须大于 0。可建议 N=100、metrics=IGD,HV，但需明确实际协议；约束研究可加 Feasible_rate。
 
-算法和问题都用 `classdef` 后面的类名，不要用文件夹名。`NSGA-III` 文件夹里的类是 `NSGAIII`，`MOEA/D` 是 `MOEAD`。不确定时搜索 `classdef`。
+seeds 为不重复 uint32 整数列表，长度等于 runs；省略时使用 0 到 runs-1。同一问题的第 r 次运行在各算法间共享 seed。版本重跑保留整份 seed 列表，不删除失败 seed。
 
-`--D` 为 `0` 或不传时用问题默认值，不要把 0 写进 `platemo` 的 `'D'`。`--N` 默认 100。使用参考点的算法可能通过 `UniformPoint` 改写 N，这不是错误。`--metrics` 默认 `IGD,HV`。约束测试集（如 LSCM）再加 `Feasible_rate`。`--baseline` 未指定时用算法列表里的最后一个。算法构造参数只在用户明确给出，或该类文件顶部有 `名字 --- 默认值 --- 含义` 且用户要求覆盖时写入 `params`，否则用 `[]`。
+自定义指标在 metric_directions 中声明 min/max，已知方向不可覆盖，未知方向不可猜测。迭代 policy 的指标也需预先声明 direction，见 [迭代判断规则](references/iteration-decisions.md)。
 
-## 大规模测试集
-
-用户未指定问题时用大规模套件，不要改用 DTLZ、ZDT 或 WFG。
-
-| 套件 | 类名 | 未写 D 时 | 说明 |
-| --- | --- | --- | --- |
-| LSMOP | `LSMOP1`–`LSMOP9` | M=3，D=100×M | 常用 D=300、500、1000 |
-| SMOP | `SMOP1`–`SMOP8` | M=2，D=100 | `params` 第一项是稀疏度 theta，默认 0.1 |
-| LSCM | `LSCM1`–`LSCM12` | M=2，D=100 | D 会被取整，以结果文件名中的 D 为准 |
-| TREE | `TREE1` 起 | M 固定为 2，D=T×3 | 不要强行改 M |
-
-有些问题会在 `Setting` 里改写 M 或 D。比较时以结果文件名里的 M、D 为准。
-
-| 预设 | 问题 | M | D | runs | maxFE |
-| --- | --- | --- | --- | --- | --- |
-| quick | LSMOP1, LSMOP5 | 3 | 300 | 3 | 50000 |
-| standard | LSMOP1–LSMOP9 | 3 | 500 | 10 | 100000 |
-| full | LSMOP1–LSMOP9，以及 SMOP1–SMOP8 | LSMOP 为 3，SMOP 为 2 | 1000 | 20 | 200000 |
-
-这些是工程默认值，不是论文协议。用户给出的数字优先。`full` 先算出“算法数 × 问题数 × runs”并说明耗时，用户确认后再启动。未指定预设、问题、maxFE、runs 时用 quick，并写明实际配置。
-
-示例配置在本技能的 `assets/lsmop_standard.json`。算法类名按用户的实验替换。
-
-## 路径
-
-- `<PLATEMO>`：包含 `platemo.m` 的目录。发行包若是外层套着 `PlatEMO/` 文件夹，就用里面那一层。
-- 本技能的 `scripts/run_platemo_batch.m` 和 `scripts/parse_results.py` 与本文件同级。
-- 配置写到 `<PLATEMO>/../experiment_config.json`；若 `<PLATEMO>` 本身就是仓库根，就写到 `<PLATEMO>/experiment_config.json`。
-- 每次 run 新建 `<PLATEMO>/Experiments/<experiment_id>/`，保存 `config.json`、`manifest.json`、`batch_run.log` 和 `Data/a<算法序号>_p<问题序号>/*.mat`。清单列出本次运行的结果和来源，比较只读清单中的文件。
-- `experiment_id` 默认自动生成。用户可在配置中指定，但已存在时拒绝运行。不要删除旧目录来复用编号。
-- 配置可选 `experiment_root`，覆盖实验根目录；相对路径以配置文件所在目录为基准。
-- 同一算法的不同参数写为多条 algorithms，每条指定唯一 `label`，例如 `{"class":"SET_NSGAIII","label":"online","params":[2,20]}`。默认 label 是类名，重复 label 会被拒绝。baseline 使用 label。
-- 平台原有 `Data/` 目录供历史数据浏览；新运行器使用自定义 outputFcn 直接保存独立结果，沿用平台的 result、metric 和指标计算。
-
-配置示例：
-
-```json
-{
-  "algorithms": [
-    {"class": "LMOCSO", "params": []},
-    {"class": "NSGAII", "params": []}
-  ],
-  "problems": [
-    {"class": "LSMOP1", "M": 3, "D": 500}
-  ],
-  "N": 100,
-  "maxFE": 100000,
-  "runs": 10,
-  "metrics": ["IGD", "HV"],
-  "save_count": 6
-}
-```
-
-`save_count` 必须大于 0。同一问题的不同 M 或 D 写成多条 `problems`。
-
-配置支持 `"seeds":[11,22,33]`（对应 runs=3），每项为 0–4294967295 的整数；未指定时自动使用 `[0,1,...,runs-1]`，实际列表写入配置快照。每个问题、每个算法的第 r 次运行使用同一 seed，形成按 seed 的配对设计。重复 seed 会被拒绝，不能用相同随机轨迹充当多次独立重复。不同版本重跑必须保留 seeds。
+assets/multiobjective_smoke.json 仅用于连通性验证；assets/lsmop_standard.json 仅在选定大规模研究时使用。示例值不能成为未说明的默认协议。
 
 ## run
 
-1. 解析用户文字并写出配置。算法未给出时先问。已给出算法，或用户说直接跑且预设已知时，用两三句话确认算法、问题、M、D、N、maxFE、runs，然后启动。
-2. 确认 `matlab` 在 PATH 中。Windows 用 `where matlab`，macOS 和 Linux 用 `command -v matlab`。没有就停止。`matlab -batch` 需要 R2019a 及以上。
-3. 先确定能执行 `import numpy, scipy` 的 Python，记为 `<PY>`。Windows 上若 `python` 是 Microsoft Store 占位程序，改用 `py -3`。
-4. 把 `<SCRIPTS>` 换成 `run_platemo_batch.m` 所在目录。在后台启动，不要为了等实验结束而把命令超时缩到几分钟。当前 Agent 不能后台执行时，给出这条命令并说明日志位置：
+1. 确认算法、问题已安装且组合兼容，明确完整配置和预算。耗时明显超出已有授权范围时再确认。
+2. 查看 `<SCRIPTS>/adapters/registry.json`。匹配到算法或声明 adapter/required_capabilities 时，按 [适配器说明](references/runtime-adapters.md) 读取对应 reference；普通算法不加载无关扩展文档。
+3. 保留已有实验，写入本轮配置。不能修改算法来掩盖依赖或适配器错误。
+4. 在平台目录执行：
 
 ```text
-matlab -batch "cd('<PLATEMO>'); addpath('<SCRIPTS>'); run_platemo_batch('<CONFIG>')"
+matlab -batch "addpath('<SCRIPTS>'); run_platemo_batch('<CONFIG>');"
 ```
 
-路径含空格时保持 MATLAB 单引号，斜杠用 `/`。
-5. 启动后只报告配置摘要，以及日志中的 `EXPERIMENT_ID`、`MANIFEST` 和该实验 `batch_run.log` 的位置。不要假装已经看到指标。后续比较使用这份清单，不要猜测哪个目录是最新实验。
-6. 结束后先看 `BATCH_SUMMARY`。`fail` 不为 0 就摘出 `FAIL:` 行及每次运行的诊断，不要对比坏数据。`SET_NSGAIII` 会自动验证依赖、真实模式、训练步数、权重和预测解注入；检测到降级就中止该次运行，清单标为 failed，批处理返回非零。其他算法的依赖日志仍需人工检查。
-7. 日志有效后再做 compare。
+5. 检查 BATCH_SUMMARY、退出状态和 manifest，失败时报告相关 run、日志与诊断，不比较坏数据。记录输出的 MANIFEST 用于后续比较。
 
-批量运行器是顺序执行的，不要再包一层 `parfor`。
+运行器在问题构造前设置 MATLAB twister，直接通过平台构造器和 Algorithm.Solve 运行，避免入口重新随机播种。沿用平台指标和 result，结束/失败后恢复调用方随机状态。参考点算法或问题可能调整 N、M、D，报告实际值。
 
-运行器在问题构造、Setting/GetOptimum 和种群初始化之前设置 `rng(seed,'twister')`，然后使用平台的构造器和 `Algorithm.Solve`；不会调用会执行 `rng('shuffle')` 的 `platemo()` 入口。算法、问题参数和保存接口保持相同。每次记录 seed、随机性证据和 seed_policy，批处理结束或失败后恢复调用方的 MATLAB 随机状态。
-
-SET 同时设置 Python random、NumPy、PyTorch CPU/CUDA 的随机流，启用确定性运算并关闭 cuDNN benchmark；无确定性实现的运算会失败，不能自动放宽为 warning。运行结束恢复 Python 随机状态和 PyTorch 开关；cuBLAS workspace 配置保持到该 MATLAB 进程结束。若 CUDA 已在缺少确定性 workspace 配置时初始化，启动新的 `matlab -batch` 进程，不要把已有会话冒充可复现运行。同 seed 的重放目标是同环境下相同的决策变量、目标值和 IGD/HV；运行时间、文件 hash、不同硬件/依赖版本不保证相同。其他算法自行重置随机流或使用其他外部随机库时，需要专门适配，不能据此声称已覆盖所有随机源。
-
-`SET_NSGAIII` 的 `runtime_diagnostics` 同时保存在结果来源、清单和 `Data/a<算法序号>_p<问题序号>/run_<r>_diagnostics.json`，该目录的 `run_<r>.log` 保留逐次日志。诊断记录 MATLAB 实际使用的 Python 与依赖版本、请求/实际 TRAIN、加载权重路径及 SHA-256、实际训练步数、预测成功/失败次数、GA 回退次数、注入解数量与留存数量。临时监测接口运行结束后恢复，不修改算法源码或子代比例。
-
-TRAIN=0 必须真正加载权重且不能在线训练；TRAIN=1 必须加载权重并执行微调，缺失/不兼容权重后的从零训练视为模式不一致。只有用户明确要在线训练时才用 TRAIN=2，不要为让实验通过擅自改模式。Python 预测返回成功还不够，必须有 MATLAB 的真实预测解注入记录。没有触发预测或训练时标为 `not_exercised`；先检查 maxFE、实际 N、GW 和每 5 代的预测间隔，调整配置重新运行。预测解留存数为 0 仍是有效机制运行，效果由指标判断。
+通用成功不能证明所有内部机制和外部随机源已验证，报告 verification_scope 的实际范围。适配器仅提供声明范围内的证据，不改变算法搜索策略；不能为通过检查擅自切换算法模式。
 
 ## compare
 
-不要改算法、问题或配置。使用本次 run 输出的清单，算法筛选和 baseline 使用配置中的 label（未指定 label 时用类名）：
-
 ```text
-<PY> <SCRIPTS>/parse_results.py --manifest <EXPERIMENT>/manifest.json --metrics IGD,HV --algorithms LMOCSO,NSGAII --baseline NSGAII --json <EXPERIMENT>/experiment_metrics.json
+<PY> <SCRIPTS>/parse_results.py --manifest <EXPERIMENT>/manifest.json --baseline NSGAIII --json <EXPERIMENT>/metrics.json
+<PY> <SCRIPTS>/parse_results.py --experiment "old=<OLD>/manifest.json" --experiment "new=<NEW>/manifest.json" --baseline old/NSGAII --json <NEW>/iteration_metrics.json
 ```
 
-比较修改前后两个实验，用重复的 `--experiment`。输出标签是 `<实验标签>/<算法label>`，因此可直接检验新版本相对旧版本的变化：
+--algorithms 支持类名、label 或完整标签，--problems 按问题类名筛选。展示每个问题 M/D、各指标 mean +/- std 和 n，不合并不同问题尺度。--metric-directions CustomScore=max 可声明自定义方向，不能与实验声明冲突。
 
-```text
-<PY> <SCRIPTS>/parse_results.py --experiment "old=<OLD>/manifest.json" --experiment "new=<NEW>/manifest.json" --metrics IGD,HV --baseline old/SET_NSGAIII --json <NEW>/iteration_metrics.json
-```
+严格校验包含：完成状态、运行成员、文件 hash、预算、save_count、问题参数、问题/平台/指标源码、最终指标、随机性、配对 seed 及启用的适配器。算法源码及参数允许不同，其他协议不一致时停止比较。
 
-比较默认严格校验：每个结果必须包含所有请求的指标；最终指标必须是有限实数，且每项指标至少有 `--min-runs` 次有效运行（默认 2，不能设为 1）。只取指标序列的最后一项；最后一项是 NaN/Inf 时，不用早期有效值替代。同一张比较表中的系列必须覆盖相同的问题 M/D，指定 baseline 时它必须覆盖每个问题和每个指标。
+指标只取序列最后一项，必须是有限实数。NaN/Inf 不用早期值替代，不删除无效运行，不临时估算 IGD/HV。所有系列覆盖相同问题 M/D，baseline 覆盖每个问题和指标。每组至少 2 次有效运行，--min-runs 可提高门槛但不保证检验能力。
 
-无效最终指标、缺失指标、缺失 baseline、有效样本不足、无法读取的文件或重复运行，会返回退出码 2，输出 `INSUFFICIENT_EVIDENCE`，不生成最优标记或显著性检验。指定 `--json` 时失败也生成诊断报告，覆盖旧报告。报告中 `status=insufficient_evidence`、`can_iterate=false`，`validation.issues` 列出原因、相关文件和运行编号；`validation.groups` 给出每项指标的有效次数。不要据此判优劣、修改算法或自动回退；先报告缺失/无效位置，再补齐或重新运行实验。
+失败退出码 2、insufficient_evidence、can_iterate=false，不生成排名或显著性结论，失败也更新 JSON。先处理 validation.issues。--preview 仅诊断预览，不能用于迭代；只有一次样本时 std 为 null。
 
-只想查看可用的部分数据时加 `--preview`。预览不显示最优标记、不做显著性检验，`can_iterate` 始终为 false；数据不足时仍返回退出码 2。仅 1 次有效样本时，std 显示 n/a（JSON 为 null）。不要把预览用于 iterate。
+新实验按 seed 对齐做双侧 Wilcoxon signed-rank，默认 α=0.05，差值分布需满足对称性假设。+/- 来自配对差值方向，= 表示未检出差异，不表示等价；全零差值 p=1。小样本不保证足够检验能力，同 seed 也不保证不同算法随机轨迹相同。
 
-有效比较向用户报告每个问题、每个指标的 `mean +/- std` 和 `n`，并带上 M、D。`*` 是该行均值最优。IGD、GD 越小越好；HV 越大越好。新清单按 seed 对齐后执行双侧 Wilcoxon signed-rank 配对检验，默认 α=0.05；必须覆盖相同的 seed 集合，缺失时停止比较。报告记录检验方法及 paired_seeds，`+`/`-` 按配对差值的中位数确定方向，中位数为 0 时使用带符号秩的方向，全体差值为 0 时 p=1。历史目录浏览保留独立样本 Mann-Whitney 检验。`=` 表示未发现显著差异，不表示等价；配对检验假设差值分布对称，同 seed 也不代表两种算法随机轨迹完全相同。最少 2 次是数据门槛，不保证检验能力；runs 小于 5 时显著性只能当线索。按问题指出落后位置。
-
-清单模式会检查实验完成状态、运行成员、结果文件 SHA-256，以及相同问题 M/D 下的 N、maxFE、save_count、问题参数、问题源码和平台/指标源码是否一致。协议不一致时停止比较；算法参数和算法源码可以不同，这是算法或版本对比的目的。实际 N、FE、算法目录源码和已有预训练权重的 hash 保存在来源记录中，JSON 报告包含所用清单和记录。
-
-比较器还会核对每条 `SET_NSGAIII` 的运行机制诊断。缺少诊断、模式不一致、加载权重未被源码清单的 hash 验证、预测/训练没有实际执行或发生 GA 回退时，即使 IGD/HV 都有效也返回退出码 2，禁止排名、显著性结论和 iterate。历史 SET 清单缺少这些证据时，需要重新运行才能用于严格比较；不要伪造诊断。
-
-严格比较也检查 seed 与配置、MATLAB 初始化时机以及 SET 的 Python/CUDA 随机性证据。旧清单缺少 seed 或证据时返回 `randomness_unverified`，配对 seed 不齐时返回 `paired_seeds_mismatch`，均禁止 iterate；需要重新运行，不给旧数据补造 seed。不要换 seed 或删除失败运行来使比较通过。
-
-没有清单的历史数据，仅在用户明确要浏览历史结果时使用 `--data-dir ... --allow-legacy` 或 `--series ... --allow-legacy`，并说明预算、参数和版本未验证。不要把这种汇总用于 iterate，也不要伪造清单给旧文件补上未知来源。
-
-诊断显示指标缺失时，检查是否以 `save>0` 和相应 `metName` 保存；最终指标无效时，检查仿真和指标计算。不要自己用目标值临时估算 IGD/HV，也不要删掉无效运行来让比较通过。
+无清单历史数据只在用户要浏览时显式使用 --allow-legacy，说明来源未验证，不用于 iterate。历史结果不补造 seed 或诊断。没有算法适配器的普通 MATLAB 算法可完成通用比较，但不能宣称已检查未监测机制。
 
 ## iterate
 
-只做一轮，然后停下来等用户决定。被修改的算法是用户点名的那个；没点名时，是这次对比中准备改进的那个。
+只做一轮，目标为用户点名算法；目标不清楚先明确，不改其他算法。
 
-1. 先完整做一次严格 compare，指定 baseline。仅退出码 0 且 JSON 中 `can_iterate=true` 时继续；这包含 SET 的运行机制校验，其他算法仍需检查依赖降级日志。`insufficient_evidence`、预览或无 baseline 的统计摘要都不能用于修改算法。
-2. 修改前读取 [迭代判断规则](references/iteration-decisions.md)，明确主指标、最低改善幅度、受保护指标的退步容限、需改善的问题比例、最少重复次数与 α，用 `decide_iteration.py prepare` 锁定方案。数值必须来自用户要求或明确说明的实验设计，不能默默采用示例。方案保留旧实验完整问题集，不能只保留落后问题。用 `classdef` 定位目标类及必要辅助文件，不要顺手重构或改别的算法。
-3. 记录旧实验清单路径，把准备修改的源文件复制到 `<OLD>/source_backup/<yyyyMMdd-HHmmss>/`。旧实验结果目录保持原样，无需再复制整个 Data。源码备份失败就不要修改或重跑。
-4. 只改一个机制或一个明确的 bug。说明改了什么、期望哪些问题变好；不能看过候选数据后改判断门槛。
-5. 用相同完整实验配置及 seeds 再走 run，在候选配置加入 `"iteration_plan":"<方案绝对路径>"`。运行器在仿真前保存方案 hash 和原文快照。若原配置有显式 experiment_id，仅删除或更换该字段以建立新实验。不要顺便换算法、问题、D、maxFE 或 seed 列表。记录新清单路径。
-6. 用 `--experiment old=... --experiment new=...` 展示前后对比，再执行 `decide_iteration.py evaluate --plan <PLAN> --candidate <NEW>/manifest.json --json <NEW>/iteration_decision.json`。`can_iterate` 只表示比较数据有效，不能代替迭代结论。只有 `can_apply=true` 且 `decision=keep` 才确认保留；`decision=revert` 才按本轮备份恢复改动，恢复前确认源码未被他人修改。`insufficient_evidence` 时保留候选待定，说明缺少什么证据，不能因不显著或改善不足强制回退。两个实验及清单始终保留。
-7. 给出改动、三态结论、触发结论的问题/指标/门槛与校正后 p 值。证据不足或本轮结束后都不要自动开始下一轮；补样本或换门槛需制定新方案并重跑完整配对实验，不能挑 seed。多轮调参最终使用独立的留出 seed/问题验证，不能把调参集上的保留结论当作泛化证明。
+1. 完成严格 compare 并指定 baseline。仅退出码 0 且 can_iterate=true 时继续；确认 verification_scope 覆盖本轮研究依赖的机制。
+2. 读取 [迭代判断规则](references/iteration-decisions.md)，明确主指标、最小改善、退步容限、改善问题比例、最少次数和 α。用 prepare 锁定旧清单、完整问题集和 seeds，示例数值不会自动成为标准。
+3. 备份本轮将改动的源文件至 `<OLD>/source_backup/<本轮编号>/`，备份失败则停止。保留旧实验与清单。
+4. 只改一个机制或明确 bug，说明假设及预期影响。不改问题、指标或预算来让结果变好。
+5. 候选配置保持完整问题、预算及 seed 列表，增加 iteration_plan 路径，建立新 experiment_id；仿真前保存方案原文和 hash。
+6. 展示前后 compare，再执行 evaluate。can_iterate 是数据门槛；can_apply=true 且 keep 才确认保留，revert 才恢复本轮源码。恢复前确认没有他人新修改。insufficient_evidence 保持待定，不因不显著自动回退。
+7. 报告改动、三态结论及触发的问题/指标/门槛和校正后 p 值。停止本轮，不自动继续。补样本需新方案并完整重跑配对实验；多轮调参最终用独立留出 seed/问题验证。

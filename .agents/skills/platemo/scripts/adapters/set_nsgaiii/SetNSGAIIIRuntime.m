@@ -36,21 +36,21 @@ classdef SetNSGAIIIRuntime < handle
                 sp = py.importlib.import_module('scipy');
                 torch = py.importlib.import_module('torch');
                 if nargin >= 4
-                    seedModule = py.importlib.import_module('seed_runtime');
+                    seedModule = py.importlib.import_module('adapters.set_nsgaiii.random_state');
                     assert(strcmpi(char(java.io.File(char(py.getattr(seedModule,'__file__'))).getCanonicalPath()), ...
-                        char(java.io.File(fullfile(scriptDir,'seed_runtime.py')).getCanonicalPath())), ...
+                        char(java.io.File(fullfile(scriptDir,'adapters','set_nsgaiii','random_state.py')).getCanonicalPath())), ...
                         'Seed controller was imported from a different skill directory.');
                     seedModule = py.importlib.reload(seedModule);
                     obj.randomGuard = seedModule.RandomStateGuard(torch,int64(seed));
                     obj.diagnostics.randomness = jsondecode(char(obj.randomGuard.info_json()));
                 end
                 module = py.importlib.import_module('SetTransformer');
-                adapter = py.importlib.import_module('set_nsgaiii_runtime');
+                adapter = py.importlib.import_module('adapters.set_nsgaiii.runtime');
                 assert(strcmpi(char(java.io.File(char(py.getattr(module,'__file__'))).getCanonicalPath()), ...
                     char(java.io.File(fullfile(folder,'SetTransformer.py')).getCanonicalPath())), ...
                     'SetTransformer was imported from a different algorithm directory.');
                 assert(strcmpi(char(java.io.File(char(py.getattr(adapter,'__file__'))).getCanonicalPath()), ...
-                    char(java.io.File(fullfile(scriptDir,'set_nsgaiii_runtime.py')).getCanonicalPath())), ...
+                    char(java.io.File(fullfile(scriptDir,'adapters','set_nsgaiii','runtime.py')).getCanonicalPath())), ...
                     'Runtime adapter was imported from a different skill directory.');
                 % 重载当前磁盘源码，避免同一 MATLAB 进程复用旧模型代码。
                 if logical(py.hasattr(module,'_platemo_runtime_monitor'))
@@ -66,6 +66,10 @@ classdef SetNSGAIIIRuntime < handle
             catch ME
                 obj.addIssue('dependency_preflight_failed',ME.message);
             end
+        end
+        function info = attach(obj,info,final)
+            info.runtime_diagnostics = obj.check(final);
+            info.randomness.python = info.runtime_diagnostics.randomness;
         end
         function ensurePreflight(obj)
             assert(isempty(obj.localIssues),'PlatEMO:SurrogateInvalid', ...

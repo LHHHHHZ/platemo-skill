@@ -1,0 +1,32 @@
+{
+  "algorithms": [
+    {
+      "class": "NSGAII",
+      "params": []
+    },
+    {
+      "class": "NSGAIII",
+      "params": []
+    }
+  ],
+  "problems": [
+    {
+      "class": "DTLZ2",
+      "M": 3,
+      "D": 8
+    }
+  ],
+  "N": 12,
+  "maxFE": 24,
+  "runs": 3,
+  "seeds": [
+    11,
+    22,
+    33
+  ],
+  "metrics": [
+    "IGD",
+    "HV"
+  ],
+  "save_count": 2
+}

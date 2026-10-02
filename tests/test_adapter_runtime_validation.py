@@ -8,7 +8,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import test_experiment_isolation as fixtures
-from set_nsgaiii_runtime import start, diagnostic_issues, weight_hash
+from adapters.set_nsgaiii.runtime import start, diagnostic_issues, weight_hash
 
 
 def model_module(weight_path=None, loaded=False, invalid=None, error=None):
@@ -206,7 +206,7 @@ class RuntimeEvidenceTests(unittest.TestCase):
                 self.assertTrue(any(item["code"].startswith("runtime_") for item in payload["validation"]["issues"]))
 
     def test_malformed_diagnostics_are_errors_not_crashes(self):
-        path, data = self.fixture.make_experiment("malformed")
+        path, data = self.fixture.make_experiment("malformed", algorithms=[{"class": "SET_NSGAIII"}])
         record = data["records"][0]
         for diag in ({}, {"status": "passed"}, [], None):
             record["runtime_diagnostics"] = diag

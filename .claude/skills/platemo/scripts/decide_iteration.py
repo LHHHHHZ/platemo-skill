@@ -13,9 +13,8 @@ import scipy
 from scipy.stats import wilcoxon
 
 from experiment_manifest import file_hash, load_manifest
-from parse_results import collect, summarize, validate_evidence, LOWER_IS_BETTER, HIGHER_IS_BETTER
-
-KNOWN_METRICS = frozenset(LOWER_IS_BETTER | HIGHER_IS_BETTER)
+from parse_results import collect, summarize, validate_evidence
+from metric_directions import resolve_directions
 
 
 def validate_policy(policy):
@@ -35,11 +34,10 @@ def validate_policy(policy):
     if not isinstance(metrics, dict) or not metrics or policy['primary_metric'] not in metrics:
         raise ValueError('primary_metric must be one of the protected metrics')
     for name, rule in metrics.items():
-        if name not in KNOWN_METRICS:
-            raise ValueError(f'Unknown metric direction: {name}')
         fields = {'scale', 'max_regression'} | ({'min_improvement'} if name == policy['primary_metric'] else set())
-        if not isinstance(rule, dict) or set(rule) != fields or rule['scale'] not in ('relative', 'absolute'):
+        if not isinstance(rule, dict) or set(rule) - {'direction'} != fields or rule['scale'] not in ('relative', 'absolute'):
             raise ValueError(f'Invalid metric policy: {name}')
+        resolve_directions([name], {name: rule['direction']} if 'direction' in rule else {})
         for field in fields - {'scale'}:
             value = rule[field]
             if type(value) not in (int, float) or not math.isfinite(value) or value < 0:
@@ -52,13 +50,14 @@ def validate_policy(policy):
 def checked_data(manifests, labels, policy, baseline=''):
     args = SimpleNamespace(manifest=None, experiment=[f'{name}={path}' for name, path in manifests],
         algorithms=','.join(labels), problems='', metrics=','.join(policy['metrics']), baseline=baseline,
-        allow_legacy=False, data_dir=None, series=[], min_runs=policy['min_runs'], preview=False)
+        allow_legacy=False, data_dir=None, series=[], min_runs=policy['min_runs'], preview=False,
+        metric_directions={name: rule['direction'] for name, rule in policy['metrics'].items() if 'direction' in rule})
     try:
         grouped = collect(args)
     except SystemExit as exc:
         raise ValueError(str(exc)) from exc
     with np.errstate(over='ignore', invalid='ignore'):
-        rows = summarize(grouped)
+        rows = summarize(grouped, args.metric_directions)
     validation = validate_evidence(args, grouped, rows)
     return args, rows, validation
 
@@ -132,7 +131,8 @@ def assess_samples(samples, old_label, new_label, policy, cases):
             if rule['scale'] == 'relative' and np.any(before == 0):
                 raise ValueError(f'{metric}: zero baseline makes relative effect undefined; predeclare absolute thresholds in a new plan')
             with np.errstate(over='ignore', invalid='ignore', divide='ignore'):
-                effects = (after - before) if metric in HIGHER_IS_BETTER else (before - after)
+                direction = resolve_directions([metric], {metric: rule['direction']} if 'direction' in rule else {})[metric]
+                effects = (after - before) if direction == 'max' else (before - after)
                 if rule['scale'] == 'relative':
                     effects = effects / np.abs(before)
                 rounding_error = 8 * np.finfo(float).eps * np.maximum(np.abs(before), np.abs(after))

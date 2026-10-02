@@ -9,7 +9,7 @@
 | 配置 | 含义 |
 | --- | --- |
 | primary_metric | 唯一主指标，必须包含在 metrics 中 |
-| metrics | 全部受保护的指标，方向由已知指标定义确定；未知指标拒绝 |
+| metrics | 全部受保护的指标，方向由已知指标定义确定；自定义指标必须在此指标规则中声明 direction 为 min/max |
 | scale | relative：逐 seed 的改善量除以旧值绝对值；absolute：原始指标单位 |
 | min_improvement | 仅主指标填写，必须为正；有证据表明改善超过此值才计为改善 |
 | max_regression | 各指标允许的退步幅度，必须非负 |
@@ -20,7 +20,7 @@
 relative 的 0.01 表示 1%；IGD 越小越好，HV 越大越好，改善统一记为正。旧值为 0 时相对变化无定义，返回证据不足；需要在新方案中预先使用有意义的绝对门槛，不用任意 epsilon 替代。门槛附近的机器舍入误差不算越过门槛。
 
 ```text
-<PY> <SCRIPTS>/decide_iteration.py prepare --baseline <OLD>/manifest.json --algorithm SET_NSGAIII --policy <POLICY.json> --out <PLAN.json>
+<PY> <SCRIPTS>/decide_iteration.py prepare --baseline <OLD>/manifest.json --algorithm NSGAII --policy <POLICY.json> --out <PLAN.json>
 ```
 
 `--algorithm` 是旧实验中的精确 label。prepare 检查旧数据完整有效，保存旧清单 SHA-256、目标算法类/label、所有问题及 M/D、seed 列表和规则。方案文件已存在时拒绝覆盖。旧数据重复次数不够时，先按预定预算重新跑基准实验。
@@ -33,13 +33,15 @@ relative 的 0.01 表示 1%；IGD 越小越好，HV 越大越好，改善统一�
 
 这是配置的新增字段，其他必需字段仍按 run 填写。相对路径以配置文件目录为基准。运行器在仿真前把原始方案复制为实验目录的 `iteration_plan.json`，并把路径和 hash 写入配置快照与清单。不得只跑落后问题；完整测试集包含原本表现好的问题。
 
+自定义指标的 policy 规则需增加 `"direction":"max"` 或 min，并与实验配置的 metric_directions 一致。该字段也可用于已知指标，但不能覆盖平台定义；主指标与受保护指标适用相同要求。
+
 ## 运行后判断
 
 ```text
 <PY> <SCRIPTS>/decide_iteration.py evaluate --plan <PLAN.json> --candidate <NEW>/manifest.json --json <NEW>/iteration_decision.json
 ```
 
-新旧 label 不同可提供 `--candidate-label`，算法类必须相同。判断器重新读取清单和结果，复用指标、协议、随机性、SET 机制检查；不接受人工写出的均值摘要。它核对旧清单未变、候选确实绑定了该方案、快照未变，以及完整问题/seed 覆盖。没有绑定方案的旧候选不能事后补登记。
+新旧 label 不同可提供 `--candidate-label`，算法类必须相同。判断器重新读取清单和结果，复用指标、协议、随机性及启用的适配器检查；不接受人工写出的均值摘要。它核对旧清单未变、候选确实绑定了该方案、快照未变，以及完整问题/seed 覆盖。没有绑定方案的旧候选不能事后补登记。
 
 每个问题、指标按 seed 计算改善量。对每个受保护指标检验改善是否高于负的退步容限，以及是否低于该边界；主指标另外检验改善是否超过最低改善幅度。使用移动门槛后的单侧 Wilcoxon signed-rank，所有问题、指标、方向的检验共同做 Holm 校正。结论还要求改善量中位数位于相应边界一侧。
 

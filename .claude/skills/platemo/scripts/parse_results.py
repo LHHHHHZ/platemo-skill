@@ -13,17 +13,7 @@ from scipy.stats import mannwhitneyu, rankdata, wilcoxon
 
 from experiment_manifest import experiment_files
 
-# PlatEMO 指标注释里的 <min> / <max>。未列出的指标按越小越好，并在输出里警告。
-LOWER_IS_BETTER = {
-    "IGD", "GD", "IGDp", "IGDX", "Spacing", "Spread", "DeltaP", "CPF",
-    "Min_value", "runtime", "Mean_IGD", "Worst_IGD",
-    "Task1_IGD", "Task2_IGD", "Task1_Min_value", "Task2_Min_value",
-    "Lower_level_Min_value", "Upper_level_Min_value",
-}
-HIGHER_IS_BETTER = {
-    "HV", "PD", "DM", "Feasible_rate", "Mean_HV", "Worst_HV",
-    "Task1_HV", "Task2_HV",
-}
+from metric_directions import LOWER_IS_BETTER, HIGHER_IS_BETTER, resolve_directions, parse_directions
 
 FILE_RE = re.compile(r"^(?P<body>.+)_M(?P<M>\d+)_D(?P<D>\d+)_(?P<run>\d+)\.mat$", re.IGNORECASE)
 
@@ -44,6 +34,7 @@ def parse_args():
     parser.add_argument("--allow-legacy", action="store_true",
                         help="Explicitly allow unverified legacy folders without experiment provenance")
     parser.add_argument("--metrics", default="IGD,HV", help="Comma-separated metric names")
+    parser.add_argument("--metric-directions", default="", help="Custom metric directions: NAME=min,NAME=max")
     parser.add_argument("--baseline", default="", help="Baseline algorithm label for the rank-sum test")
     parser.add_argument("--algorithms", default="", help="Comma-separated algorithm folder names to keep")
     parser.add_argument("--problems", default="", help="Comma-separated problem class names to keep")
@@ -68,13 +59,8 @@ def split_csv(text):
     return [item.strip() for item in text.split(",") if item.strip()]
 
 
-def higher_better(metric):
-    if metric in HIGHER_IS_BETTER:
-        return True
-    if metric not in LOWER_IS_BETTER:
-        print(f"WARNING: unknown metric {metric}; treating smaller as better", file=sys.stderr)
-        LOWER_IS_BETTER.add(metric)
-    return False
+def higher_better(metric, directions=None):
+    return resolve_directions([metric], directions)[metric] == 'max'
 
 
 def metric_dict(path):
@@ -159,6 +145,17 @@ def collect(args):
     args.group_files = {}
     seen = set()
     files = collect_files(args)
+    declarations = getattr(args, 'metric_directions', {})
+    if isinstance(declarations, str): declarations = parse_directions(declarations)
+    declarations = dict(declarations)
+    for experiment in args.provenance:
+        declared = experiment['config'].get('metric_directions', {})
+        resolve_directions([], declared)
+        for metric, direction in declared.items():
+            if metric in declarations and declarations[metric] != direction:
+                raise ValueError(f'Conflicting experiment metric direction: {metric}')
+            declarations[metric] = direction
+    args.metric_directions = resolve_directions(wanted, declarations)
     args.seed_samples = {}
     record_lookup = {(record['series'], str((Path(experiment['manifest']).parent / record['file']).resolve())): record
                      for experiment in args.provenance for record in experiment['records']}
@@ -219,7 +216,7 @@ def collect(args):
     return grouped
 
 
-def summarize(grouped):
+def summarize(grouped, directions=None):
     rows = []
     for (problem, m_obj, dim, algorithm), metrics in grouped.items():
         for metric, values in metrics.items():
@@ -236,8 +233,8 @@ def summarize(grouped):
                 "mean": float(arr.mean()),
                 "std": float(arr.std(ddof=1)) if arr.size > 1 else None,
                 "median": float(np.median(arr)),
-                "best": float(arr.max() if higher_better(metric) else arr.min()),
-                "worst": float(arr.min() if higher_better(metric) else arr.max()),
+                "best": float(arr.max() if higher_better(metric, directions) else arr.min()),
+                "worst": float(arr.min() if higher_better(metric, directions) else arr.max()),
                 "values": arr.tolist(),
             })
     return rows
@@ -246,14 +243,17 @@ def summarize(grouped):
 def validate_evidence(args, grouped, rows):
     """校验每个问题/指标的样本和 baseline，失败时禁止生成优劣结论。"""
     issues = list(args.issues)
-    from set_nsgaiii_runtime import diagnostic_issues
-    from seed_runtime import randomness_issues
+    from runtime_adapters import validate_record
+    scopes = []
     args.paired = bool(args.provenance)
     for experiment in args.provenance:
         if not experiment['config'].get('seed_policy'):
             args.paired = False
+        specs = {spec.get('label', spec['class']): spec for spec in experiment['config']['algorithms']}
         for record in experiment['records']:
-            for issue in diagnostic_issues(record) + randomness_issues(record):
+            record_issues, scope = validate_record(record, specs[record['label']])
+            scopes.append({'algorithm': record['series'], 'problem': record['problem'], 'run': record['run'], **scope})
+            for issue in record_issues:
                 issues.append({**issue, 'algorithm': record['series'], 'problem': record['problem'],
                                'M': record['M'], 'D': record['D'], 'run': record['run'],
                                'file': record['file']})
@@ -306,23 +306,23 @@ def validate_evidence(args, grouped, rows):
     ready = not issues
     comparison_ready = ready and bool(args.baseline) and len(labels) > 1 and not args.preview
     return {"status": "ready" if ready else "insufficient_evidence", "min_runs": args.min_runs,
-            "preview": args.preview, "issues": issues, "groups": groups,
+            "preview": args.preview, "issues": issues, "groups": groups, "verification_scope": scopes,
             "comparison_ready": comparison_ready,
             "can_iterate": comparison_ready and bool(args.provenance), **args.file_stats}
 
 
-def mark_best(rows):
+def mark_best(rows, directions=None):
     groups = {}
     for row in rows:
         groups.setdefault((row["problem"], row["M"], row["D"], row["metric"]), []).append(row)
     for group in groups.values():
         metric = group[0]["metric"]
-        best_mean = max(row["mean"] for row in group) if higher_better(metric) else min(row["mean"] for row in group)
+        best_mean = max(row["mean"] for row in group) if higher_better(metric, directions) else min(row["mean"] for row in group)
         for row in group:
             row["is_best"] = abs(row["mean"] - best_mean) <= 1e-12
 
 
-def rank_tests(rows, baseline, alpha, seed_samples=None):
+def rank_tests(rows, baseline, alpha, seed_samples=None, directions=None):
     if not baseline:
         return []
     by_key = {}
@@ -346,7 +346,7 @@ def rank_tests(rows, baseline, alpha, seed_samples=None):
                     raise ValueError('Paired comparison requires identical seed sets')
                 candidate = [candidate_by_seed[seed] for seed in seeds]
                 reference = [baseline_by_seed[seed] for seed in seeds]
-            symbol, p_value = compare_samples(candidate, reference, higher_better(metric), alpha, paired=seeds is not None)
+            symbol, p_value = compare_samples(candidate, reference, higher_better(metric, directions), alpha, paired=seeds is not None)
             tests.append({
                 "problem": problem,
                 "M": m_obj,
@@ -442,14 +442,12 @@ def main():
     args.issues = []
     args.group_files = {}
     args.file_stats = {"files_used": 0, "files_skipped": 0, "missing_metric_fields": 0}
-    for metric in split_csv(args.metrics):
-        higher_better(metric)
     try:
         grouped = collect(args)
         with np.errstate(over="ignore", invalid="ignore"):
-            rows = summarize(grouped)
+            rows = summarize(grouped, args.metric_directions)
         validation = validate_evidence(args, grouped, rows)
-    except SystemExit as exc:
+    except (SystemExit, ValueError) as exc:
         code = "baseline_missing" if str(exc).startswith("Baseline is not") else "source_validation_failed"
         rows = []
         validation = {"status": "insufficient_evidence", "min_runs": args.min_runs, "preview": args.preview,
@@ -457,8 +455,8 @@ def main():
                       "comparison_ready": False, "can_iterate": False, **args.file_stats}
     tests = []
     if validation["status"] == "ready" and not args.preview:
-        mark_best(rows)
-        tests = rank_tests(rows, args.baseline, args.alpha, args.seed_samples if args.paired else None)
+        mark_best(rows, args.metric_directions)
+        tests = rank_tests(rows, args.baseline, args.alpha, args.seed_samples if args.paired else None, args.metric_directions)
         print(render_table(rows, tests))
     elif args.preview and rows:
         print(render_table(rows, [], preview=True))
@@ -470,7 +468,7 @@ def main():
     print(f"VALIDATION_STATUS={validation['status']} CAN_ITERATE={str(validation['can_iterate']).lower()}", file=sys.stderr)
     if args.json_path:
         payload = {"rows": [public_row(row) for row in rows], "tests": tests, "alpha": args.alpha,
-                   "provenance_verified": bool(args.provenance), "experiments": args.provenance,
+                   "metric_directions": args.metric_directions, "provenance_verified": bool(args.provenance), "experiments": args.provenance,
                    "status": validation["status"], "comparison_ready": validation["comparison_ready"],
                    "can_iterate": validation["can_iterate"], "validation": validation}
         # 失败也写诊断报告，覆盖可能存在的旧成功报告，且不输出 NaN/Infinity JSON。

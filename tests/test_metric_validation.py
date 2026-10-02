@@ -78,7 +78,7 @@ class MetricValidationTests(unittest.TestCase):
         self.assertEqual(result[2], "")
         issue = next(item for item in result[1]["validation"]["issues"] if item["code"] == "invalid_final_metric")
         self.assertEqual((issue["algorithm"], issue["problem"], issue["metric"], issue["run"]),
-                         ("SET_NSGAIII", "LSMOP1", "IGD", 2))
+                         ("NSGAII", "LSMOP1", "IGD", 2))
         igd = next(row for row in result[1]["rows"] if row["metric"] == "IGD")
         self.assertEqual((igd["n"], igd["mean"]), (2, 2.0))
 
@@ -113,7 +113,7 @@ class MetricValidationTests(unittest.TestCase):
         self.assertTrue(result[1]["validation"]["preview"])
 
     def test_valid_preview_never_enables_iteration(self):
-        algorithms = [{"class": "SET_NSGAIII", "params": []}, {"class": "NSGAIII", "params": []}]
+        algorithms = [{"class": "NSGAII", "params": []}, {"class": "NSGAIII", "params": []}]
         path, _ = self.make_experiment(algorithms=algorithms)
         code, payload, stdout, _ = self.run_parser("--manifest", path, "--baseline", "NSGAIII", "--preview")
         self.assertEqual(code, 0)
@@ -143,7 +143,7 @@ class MetricValidationTests(unittest.TestCase):
         self.assertIn("series_missing", {item["code"] for item in result[1]["validation"]["issues"]})
 
     def test_baseline_metric_must_be_valid(self):
-        algorithms = [{"class": "SET_NSGAIII", "params": []}, {"class": "NSGAIII", "params": []}]
+        algorithms = [{"class": "NSGAII", "params": []}, {"class": "NSGAIII", "params": []}]
         path, data = self.make_experiment(algorithms=algorithms)
         for index in range(3, 6):
             self.replace_result(path, data, index, {"IGD": 1.0, "HV": np.nan})
@@ -171,7 +171,7 @@ class MetricValidationTests(unittest.TestCase):
         self.assert_insufficient(self.run_parser("--manifest", path, "--metrics", "GD"), "source_validation_failed")
 
     def test_valid_comparison_retains_statistics_and_enables_iteration(self):
-        algorithms = [{"class": "SET_NSGAIII", "params": []}, {"class": "NSGAIII", "params": []}]
+        algorithms = [{"class": "NSGAII", "params": []}, {"class": "NSGAIII", "params": []}]
         path, _ = self.make_experiment(algorithms=algorithms)
         code, payload, stdout, _ = self.run_parser("--manifest", path, "--baseline", "NSGAIII")
         self.assertEqual(code, 0)
@@ -192,7 +192,7 @@ class MetricValidationTests(unittest.TestCase):
     def test_legacy_preview_catches_duplicate_runs_and_missing_baseline(self):
         path, data = self.make_experiment()
         # 历史 series 的目录名必须与算法类名一致。
-        folder = self.root / "SET_NSGAIII"
+        folder = self.root / "NSGAII"
         folder.mkdir()
         for record in data["records"]:
             original = path.parent / record["file"]

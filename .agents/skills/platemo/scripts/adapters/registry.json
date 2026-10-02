@@ -1,0 +1,26 @@
+{
+  "schema_version": 1,
+  "adapters": [
+    {
+      "id": "set_nsgaiii",
+      "version": 1,
+      "algorithms": [
+        "SET_NSGAIII"
+      ],
+      "matlab_class": "SetNSGAIIIRuntime",
+      "python_module": "adapters.set_nsgaiii.runtime",
+      "capabilities": [
+        "runtime_mechanism",
+        "python_random",
+        "numpy_random",
+        "torch_random"
+      ],
+      "sources": [
+        "adapters/set_nsgaiii/SetNSGAIIIRuntime.m",
+        "adapters/set_nsgaiii/runtime.py",
+        "adapters/set_nsgaiii/random_state.py"
+      ],
+      "reference": "references/adapters/set-nsgaiii.md"
+    }
+  ]
+}

@@ -23,29 +23,20 @@ parser = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(parser)
 
 
-def passed_diagnostics(mode=1):
-    return {"schema_version": 1, "adapter": "SET_NSGAIII", "requested_mode": mode,
-            "status": "passed", "python_ready": True, "cache_reset_calls": 1, "model_calls": 2,
-            "prediction_attempts": 2, "prediction_successes": 2, "prediction_failures": 0,
-            "predicted_solutions": 182, "ga_fallbacks": 0, "injected_batches": 2,
-            "injected_solutions": 44, "surviving_solutions": 0, "training_steps": 0 if mode == 0 else 10, "issues": [],
-            "models": [{"requested_mode": mode, "actual_mode": mode, "pretrained_loaded": mode != 2,
-                        "weight_path": "fixture.pth" if mode != 2 else None,
-                        "weight_sha256": "fixture-weight" if mode != 2 else None}]}
 
 
 def seed_policy():
-    return {"schema_version": 1, "design": "paired", "matlab_generator": "twister",
-            "entrypoint": "direct_solve", "python_policy": "deterministic-v1"}
+    return {"schema_version": 2, "design": "paired", "matlab_generator": "twister",
+            "entrypoint": "direct_solve", "external_policy": "adapter-defined"}
 
 
 def randomness(seed, algorithm):
     result = {"matlab": {"seed": seed, "generator": "twister", "initialized_before_problem": True}}
-    if algorithm == "SET_NSGAIII":
-        result["python"] = {"schema_version": 1, "seed": seed, "python_random": True, "numpy": True,
-                            "torch_cpu": True, "torch_cuda": False, "deterministic_algorithms": True,
-                            "warn_only": False, "cudnn_benchmark": False, "cudnn_deterministic": True,
-                            "cublas_workspace_config": ":4096:8"}
+    from runtime_adapters import resolve_adapter
+    import importlib
+    entry = resolve_adapter(algorithm)
+    if entry['id'] != 'none':
+        result.update(importlib.import_module(entry['id'] + '_fixtures').randomness(seed))
     return result
 
 
@@ -60,7 +51,7 @@ class ExperimentIsolationTests(unittest.TestCase):
     def make_experiment(self, name, runs=3, algorithms=None, **config_overrides):
         folder = self.root / name
         folder.mkdir()
-        algorithms = algorithms or [{"class": "SET_NSGAIII", "params": []}]
+        algorithms = algorithms or [{"class": "NSGAII", "params": []}]
         config = {"algorithms": algorithms,
                   "problems": [{"class": "LSMOP1", "M": 3, "D": 500, "params": []}],
                   "N": 100, "maxFE": 100000, "runs": runs,
@@ -89,9 +80,11 @@ class ExperimentIsolationTests(unittest.TestCase):
                                 "M": 3, "D": 500, "actual_N": 91, "actual_FE": config["maxFE"],
                                 "status": "ok", "file": result.relative_to(folder).as_posix(),
                                 "sha256": file_hash(result)})
-                if algorithm["class"] == "SET_NSGAIII":
-                    values = params(algorithm)
-                    records[-1]["runtime_diagnostics"] = passed_diagnostics(values[0] if values else 1)
+                from runtime_adapters import resolve_adapter
+                import importlib
+                entry = resolve_adapter(algorithm['class'])
+                if entry['id'] != 'none':
+                    records[-1]['runtime_diagnostics'] = importlib.import_module(entry['id'] + '_fixtures').diagnostics(params(algorithm))
         manifest = {"schema_version": 1, "experiment_id": name, "status": "completed", "config": config,
                     "platform_sources": sources, "expected_runs": len(records), "records": records}
         path = folder / "manifest.json"
@@ -120,21 +113,21 @@ class ExperimentIsolationTests(unittest.TestCase):
         self.assertEqual({row["n"] for row in rows}, {3})
         self.assertEqual(rows[0]["mean"], 2.0)
         compared, _ = experiment_files(self.args(experiments=[f"old={old}", f"new={new}"]))
-        self.assertEqual(sum(label == "old/SET_NSGAIII" for label, _, _ in compared), 10)
-        self.assertEqual(sum(label == "new/SET_NSGAIII" for label, _, _ in compared), 3)
+        self.assertEqual(sum(label == "old/NSGAII" for label, _, _ in compared), 10)
+        self.assertEqual(sum(label == "new/NSGAII" for label, _, _ in compared), 3)
 
     def test_unlisted_file_is_ignored(self):
         path, data = self.make_experiment("new")
         result = path.parent / data["records"][0]["file"]
-        savemat(result.with_name("SET_NSGAIII_LSMOP1_M3_D500_99.mat"), {"metric": {"IGD": 999.0}})
+        savemat(result.with_name("NSGAII_LSMOP1_M3_D500_99.mat"), {"metric": {"IGD": 999.0}})
         self.assertEqual(len(experiment_files(self.args(path))[0]), 3)
 
     def test_variants_of_same_class_keep_separate_labels(self):
-        algorithms = [{"class": "SET_NSGAIII", "label": "inference", "params": [0, 20]},
-                      {"class": "SET_NSGAIII", "label": "online", "params": [2, 20]}]
+        algorithms = [{"class": "NSGAII", "label": "variant_a", "params": []},
+                      {"class": "NSGAII", "label": "variant_b", "params": []}]
         path, _ = self.make_experiment("variants", algorithms=algorithms)
         rows = parser.summarize(parser.collect(self.args(path)))
-        self.assertEqual({row["algorithm"] for row in rows}, {"inference", "online"})
+        self.assertEqual({row["algorithm"] for row in rows}, {"variant_a", "variant_b"})
         self.assertEqual({row["n"] for row in rows}, {3})
 
     def test_protocol_mismatches_are_rejected(self):
@@ -218,10 +211,10 @@ class ExperimentIsolationTests(unittest.TestCase):
         self.assertEqual(len(data["experiments"][0]["records"]), 3)
 
     def test_legacy_requires_explicit_opt_in(self):
-        folder = self.root / "legacy" / "SET_NSGAIII"
+        folder = self.root / "legacy" / "NSGAII"
         folder.mkdir(parents=True)
-        savemat(folder / "SET_NSGAIII_LSMOP1_M3_D500_1.mat", {"metric": {"IGD": 1.0, "HV": 0.5}})
-        savemat(folder / "SET_NSGAIII_LSMOP1_M3_D500_2.mat", {"metric": {"IGD": 2.0, "HV": 0.6}})
+        savemat(folder / "NSGAII_LSMOP1_M3_D500_1.mat", {"metric": {"IGD": 1.0, "HV": 0.5}})
+        savemat(folder / "NSGAII_LSMOP1_M3_D500_2.mat", {"metric": {"IGD": 2.0, "HV": 0.6}})
         denied = self.cli("--data-dir", folder.parent)
         self.assertNotEqual(denied.returncode, 0)
         self.assertIn("--allow-legacy", denied.stderr)
@@ -240,7 +233,7 @@ class ExperimentIsolationTests(unittest.TestCase):
                 experiment_files(args)
 
     def test_filters_select_exact_algorithm_and_problem(self):
-        path, _ = self.make_experiment("new", algorithms=[{"class": "SET_NSGAIII", "params": []},
+        path, _ = self.make_experiment("new", algorithms=[{"class": "NSGAII", "params": []},
                                                          {"class": "NSGAIII", "params": []}])
         rows, provenance = experiment_files(self.args(experiments=[f"new={path}"], algorithms="new/NSGAIII"))
         self.assertEqual(len(rows), 3)
