@@ -8,6 +8,8 @@ license: MIT
 
 需要 MATLAB R2019a+，以及安装 numpy、scipy 的 Python。配套脚本在本文件旁的 `scripts/` 目录。
 
+运行 `SET_NSGAIII` 时需要支持 `pyenv` 的 MATLAB（R2019b+），以及该算法 `.venv/Scripts/python.exe` 中的 numpy、scipy、torch。结果解析所用的 `<PY>` 可以是另一解释器；仅在 `<PY>` 中安装依赖不能证明 MATLAB 的算法依赖可用。
+
 这个技能驱动 PlatEMO 实验：批量运行任意已安装算法，按实验清单读取指标，判断优劣，并在用户要求迭代时只改被点名的那个算法。默认测试集是大规模多目标问题。不要启动无参数的 `platemo()`，那会打开 GUI。
 
 调用技能时用户给出的文字里可以有：
@@ -92,10 +94,14 @@ matlab -batch "cd('<PLATEMO>'); addpath('<SCRIPTS>'); run_platemo_batch('<CONFIG
 
 路径含空格时保持 MATLAB 单引号，斜杠用 `/`。
 5. 启动后只报告配置摘要，以及日志中的 `EXPERIMENT_ID`、`MANIFEST` 和该实验 `batch_run.log` 的位置。不要假装已经看到指标。后续比较使用这份清单，不要猜测哪个目录是最新实验。
-6. 结束后先看 `BATCH_SUMMARY`。`fail` 不为 0 就摘出 `FAIL:` 行，不要对比坏数据。日志表明算法依赖没有初始化并已退回另一种搜索时，这次对比无效。
+6. 结束后先看 `BATCH_SUMMARY`。`fail` 不为 0 就摘出 `FAIL:` 行及每次运行的诊断，不要对比坏数据。`SET_NSGAIII` 会自动验证依赖、真实模式、训练步数、权重和预测解注入；检测到降级就中止该次运行，清单标为 failed，批处理返回非零。其他算法的依赖日志仍需人工检查。
 7. 日志有效后再做 compare。
 
 批量运行器是顺序执行的，不要再包一层 `parfor`。
+
+`SET_NSGAIII` 的 `runtime_diagnostics` 同时保存在结果来源、清单和 `Data/a<算法序号>_p<问题序号>/run_<r>_diagnostics.json`，该目录的 `run_<r>.log` 保留逐次日志。诊断记录 MATLAB 实际使用的 Python 与依赖版本、请求/实际 TRAIN、加载权重路径及 SHA-256、实际训练步数、预测成功/失败次数、GA 回退次数、注入解数量与留存数量。临时监测接口运行结束后恢复，不修改算法源码或子代比例。
+
+TRAIN=0 必须真正加载权重且不能在线训练；TRAIN=1 必须加载权重并执行微调，缺失/不兼容权重后的从零训练视为模式不一致。只有用户明确要在线训练时才用 TRAIN=2，不要为让实验通过擅自改模式。Python 预测返回成功还不够，必须有 MATLAB 的真实预测解注入记录。没有触发预测或训练时标为 `not_exercised`；先检查 maxFE、实际 N、GW 和每 5 代的预测间隔，调整配置重新运行。预测解留存数为 0 仍是有效机制运行，效果由指标判断。
 
 ## compare
 
@@ -121,6 +127,8 @@ matlab -batch "cd('<PLATEMO>'); addpath('<SCRIPTS>'); run_platemo_batch('<CONFIG
 
 清单模式会检查实验完成状态、运行成员、结果文件 SHA-256，以及相同问题 M/D 下的 N、maxFE、save_count、问题参数、问题源码和平台/指标源码是否一致。协议不一致时停止比较；算法参数和算法源码可以不同，这是算法或版本对比的目的。实际 N、FE、算法目录源码和已有预训练权重的 hash 保存在来源记录中，JSON 报告包含所用清单和记录。
 
+比较器还会核对每条 `SET_NSGAIII` 的运行机制诊断。缺少诊断、模式不一致、加载权重未被源码清单的 hash 验证、预测/训练没有实际执行或发生 GA 回退时，即使 IGD/HV 都有效也返回退出码 2，禁止排名、显著性结论和 iterate。历史 SET 清单缺少这些证据时，需要重新运行才能用于严格比较；不要伪造诊断。
+
 没有清单的历史数据，仅在用户明确要浏览历史结果时使用 `--data-dir ... --allow-legacy` 或 `--series ... --allow-legacy`，并说明预算、参数和版本未验证。不要把这种汇总用于 iterate，也不要伪造清单给旧文件补上未知来源。
 
 诊断显示指标缺失时，检查是否以 `save>0` 和相应 `metName` 保存；最终指标无效时，检查仿真和指标计算。不要自己用目标值临时估算 IGD/HV，也不要删掉无效运行来让比较通过。
@@ -129,7 +137,7 @@ matlab -batch "cd('<PLATEMO>'); addpath('<SCRIPTS>'); run_platemo_batch('<CONFIG
 
 只做一轮，然后停下来等用户决定。被修改的算法是用户点名的那个；没点名时，是这次对比中准备改进的那个。
 
-1. 先完整做一次严格 compare，指定 baseline。仅退出码 0 且 JSON 中 `can_iterate=true` 时继续；这是数据完整性门槛，仍需检查 run 的依赖降级日志。`insufficient_evidence`、预览或无 baseline 的统计摘要都不能用于修改算法。
+1. 先完整做一次严格 compare，指定 baseline。仅退出码 0 且 JSON 中 `can_iterate=true` 时继续；这包含 SET 的运行机制校验，其他算法仍需检查依赖降级日志。`insufficient_evidence`、预览或无 baseline 的统计摘要都不能用于修改算法。
 2. 只把落后的问题当成修改依据。用 `classdef` 定位该类的 `.m`，只在需要时读同目录里的辅助文件。不要顺手重构，也不要改别的算法。
 3. 记录旧实验清单路径，把准备修改的源文件复制到 `<OLD>/source_backup/<yyyyMMdd-HHmmss>/`。旧实验结果目录保持原样，无需再复制整个 Data。源码备份失败就不要修改或重跑。
 4. 只改一个机制或一个明确的 bug。说明改了什么、期望哪些问题变好、什么结果算退步。

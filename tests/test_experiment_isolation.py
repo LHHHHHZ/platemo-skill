@@ -23,6 +23,17 @@ parser = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(parser)
 
 
+def passed_diagnostics(mode=1):
+    return {"schema_version": 1, "adapter": "SET_NSGAIII", "requested_mode": mode,
+            "status": "passed", "python_ready": True, "cache_reset_calls": 1, "model_calls": 2,
+            "prediction_attempts": 2, "prediction_successes": 2, "prediction_failures": 0,
+            "predicted_solutions": 182, "ga_fallbacks": 0, "injected_batches": 2,
+            "injected_solutions": 44, "surviving_solutions": 0, "training_steps": 0 if mode == 0 else 10, "issues": [],
+            "models": [{"requested_mode": mode, "actual_mode": mode, "pretrained_loaded": mode != 2,
+                        "weight_path": "fixture.pth" if mode != 2 else None,
+                        "weight_sha256": "fixture-weight" if mode != 2 else None}]}
+
+
 class ExperimentIsolationTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="platemo-isolation-")
@@ -51,13 +62,17 @@ class ExperimentIsolationTests(unittest.TestCase):
                 result = case / filename
                 savemat(result, {"metric": {"IGD": float(run), "HV": 0.5}})
                 records.append({"experiment_id": name, "algorithm": algorithm["class"], "label": label,
-                                "algorithm_params": params(algorithm), "algorithm_sources": sources,
+                                "algorithm_params": params(algorithm), "algorithm_sources": sources + [
+                                    {"path": "fixture.pth", "sha256": "fixture-weight"}],
                                 "problem": "LSMOP1", "problem_params": params(config["problems"][0]),
                                 "problem_sources": sources, "problem_index": 1, "run": run,
                                 "requested_N": config["N"], "maxFE": config["maxFE"],
                                 "M": 3, "D": 500, "actual_N": 91, "actual_FE": config["maxFE"],
                                 "status": "ok", "file": result.relative_to(folder).as_posix(),
                                 "sha256": file_hash(result)})
+                if algorithm["class"] == "SET_NSGAIII":
+                    values = params(algorithm)
+                    records[-1]["runtime_diagnostics"] = passed_diagnostics(values[0] if values else 1)
         manifest = {"schema_version": 1, "experiment_id": name, "status": "completed", "config": config,
                     "platform_sources": sources, "expected_runs": len(records), "records": records}
         path = folder / "manifest.json"

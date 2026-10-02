@@ -76,7 +76,7 @@ python <技能目录>/scripts/parse_results.py --experiment "old=<旧实验>/man
 }
 ```
 
-报告还包含每组的预期运行数和各指标有效次数。只有完整、有效、有 baseline 的清单比较才能给出 `can_iterate=true`；单算法摘要、历史目录浏览和预览都不能用于自动迭代。`can_iterate` 是数据门槛，仍需检查算法依赖是否降级，及改动本身是否值得保留。
+报告还包含每组的预期运行数和各指标有效次数。只有完整、有效、有 baseline 的清单比较才能给出 `can_iterate=true`；单算法摘要、历史目录浏览和预览都不能用于自动迭代。该门槛包含 SET 的运行机制校验，其他算法仍需检查依赖日志；改动本身是否值得保留仍需结合指标判断。
 
 需要排查部分数据时，可以预览：
 
@@ -87,6 +87,27 @@ python <技能目录>/scripts/parse_results.py --manifest <实验目录>/manifes
 预览会显示可用数据的统计摘要，但不标记最优、不做显著性检验，`can_iterate` 始终为 false；数据不足时仍返回退出码 2。只有 1 次样本时，标准差显示 n/a，JSON 中为 null。
 
 回归测试：`python -m unittest discover -s tests -p "test_*.py" -v`。真实 MATLAB 保存验证位于 `tests/test_batch_runner.m`，传入平台目录和新建的临时输出目录后执行，只使用小预算。
+
+## SET-NSGAIII 的真实运行校验
+
+`SET_NSGAIII` 经由 MATLAB 调用算法目录 `.venv/Scripts/python.exe`。运行器先验证这个解释器里的 numpy、scipy、torch，并检查 `SetTransformer.py` 的实际导入位置，避免只在结果解析环境中检查依赖。SET 运行需要 MATLAB R2019b+（[`pyenv` 官方文档](https://www.mathworks.com/help/matlab/ref/pyenv.html)）；普通算法仍为 R2019a+。
+
+运行时临时监测原 Python 接口，记录实际训练模式、权重加载与 SHA-256、成功训练步数及预测次数；再读取 MATLAB 的逐次日志，核对预测解实际注入和 GA 回退。临时接口在结束或异常时恢复，算法源码、子代比例和优化策略保持原样。
+
+| 情况 | 处理 |
+| --- | --- |
+| TRAIN=0 | 必须加载权重，禁止在线训练，必须完成预测解注入 |
+| TRAIN=1 | 必须加载权重并真正微调，缺权重后从零训练被拒绝 |
+| TRAIN=2 | 允许从零在线训练，必须真正训练和注入预测解 |
+| 初始化/预测失败、MATLAB 转换失败或 GA 回退 | 中止该次运行，清单标为 failed，批处理返回非零 |
+| 预算太短、未触发预测/训练或没有注入解 | 诊断为 not_exercised，阻止作为完整 SET 实验使用 |
+| 预测解注入后留存为 0 | 机制有效，质量由 IGD/HV 判断 |
+
+每次 SET 运行保存 `Data/a<算法序号>_p<问题序号>/run_<r>.log` 和 `run_<r>_diagnostics.json`，诊断也写入清单及成功结果的 `experiment_info.runtime_diagnostics`。可查询 `requested_mode`、`models[].actual_mode`、`models[].weight_sha256`、`training_steps`、`prediction_successes`、`prediction_failures`、`ga_fallbacks`、`injected_solutions` 与 `issues`；环境记录包括实际 Python 路径及依赖版本。
+
+严格比较会再次验证这些证据。SET 历史清单没有诊断，或诊断与参数/权重来源不一致时，即使指标有限也输出 `INSUFFICIENT_EVIDENCE`、退出码 2、`can_iterate=false`，不生成优劣结论。需要重新运行，不能给历史数据伪造证明。其他算法保持原有比较流程，其特殊依赖仍需人工检查。
+
+不要为了通过校验自动把 TRAIN=1 改成 TRAIN=2。用户明确需要纯在线实验时才配置 `[2,GW]`；`not_exercised` 应先检查预算、实际 N、GW 和每 5 代的预测间隔。真实 MATLAB 回归验证见 `tests/test_runtime_runner.m`，使用独立临时目录和小预算，覆盖在线成功、权重降级、短预算以及接口恢复。
 
 ## 许可
 

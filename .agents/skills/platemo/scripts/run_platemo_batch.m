@@ -13,6 +13,7 @@ function run_platemo_batch(config_path)
     end
 
     script_dir = fileparts(mfilename('fullpath'));
+    addpath(script_dir);
     platemo_dir = findPlatEMO(script_dir);
     addpath(genpath(platemo_dir));
 
@@ -87,6 +88,10 @@ function run_platemo_batch(config_path)
         algoArg = callableArg(algo);
         algoName = char(algo.class);
         algoSources = classSources(algoName,platemo_dir,true);
+        if strcmp(algoName,'SET_NSGAIII')
+            algoSources = [algoSources,sourceRecords({fullfile(script_dir,'SetNSGAIIIRuntime.m'), ...
+                fullfile(script_dir,'set_nsgaiii_runtime.py')},platemo_dir)];
+        end
         for p = 1:numel(problems)
             prob = problems{p};
             probArg = callableArg(prob);
@@ -99,13 +104,23 @@ function run_platemo_batch(config_path)
                 count = count + 1;
                 fprintf('[%d/%d] %s x %s (M=%g) run=%d ... ', ...
                     count, total, algoName, char(prob.class), M, r);
+                runtime = [];
+                runtime_guard = [];
+                run_log = fullfile(case_dir,sprintf('run_%d.log',r));
+                diary off;
+                diary(run_log);
+                info = struct('experiment_id',experiment_id, 'algorithm',algoName, ...
+                    'label',labels{a}, 'algorithm_params',{specParams(algo)}, ...
+                    'algorithm_sources',{algoSources}, 'problem',char(prob.class), ...
+                    'problem_params',{specParams(prob)}, 'problem_sources',{probSources}, ...
+                    'problem_index',p, 'run',r, 'requested_N',N, 'maxFE',maxFE);
                 try
-                    info = struct('experiment_id',experiment_id, 'algorithm',algoName, ...
-                        'label',labels{a}, 'algorithm_params',{specParams(algo)}, ...
-                        'algorithm_sources',{algoSources}, 'problem',char(prob.class), ...
-                        'problem_params',{specParams(prob)}, 'problem_sources',{probSources}, ...
-                        'problem_index',p, 'run',r, 'requested_N',N, 'maxFE',maxFE);
-                    output = @(A,P) saveExperimentResult(A,P,case_dir,info);
+                    if strcmp(algoName,'SET_NSGAIII')
+                        runtime = SetNSGAIIIRuntime(specParams(algo),script_dir,run_log);
+                        runtime_guard = onCleanup(@()runtime.close());
+                        runtime.ensurePreflight();
+                    end
+                    output = @(A,P) saveExperimentResult(A,P,case_dir,info,runtime);
                     args = {'algorithm', algoArg, 'problem', probArg, ...
                             'M', M, 'N', N, 'maxFE', maxFE, ...
                             'save', saveCount, 'metName', metrics, 'run', r, 'outputFcn',output};
@@ -121,15 +136,31 @@ function run_platemo_batch(config_path)
                     record.status = 'ok';
                     record.file = strrep(result_path(length(experiment_dir)+2:end),'\','/');
                     record.sha256 = fileHash(result_path);
+                    record.log = strrep(run_log(length(experiment_dir)+2:end),'\','/');
                     manifest.records{end+1} = record;
                     fprintf('OK\n');
                 catch ME
                     fail = fail + 1;
-                    manifest.records{end+1} = struct('algorithm',algoName, 'label',labels{a}, ...
-                        'problem',char(prob.class), 'problem_index',p, 'run',r, ...
-                        'status','failed', 'error',ME.message);
+                    record = info;
+                    record.status = 'failed';
+                    record.error = ME.message;
+                    if ~isempty(runtime)
+                        record.runtime_diagnostics = runtime.report(true);
+                    end
+                    record.log = strrep(run_log(length(experiment_dir)+2:end),'\','/');
+                    manifest.records{end+1} = record;
                     fprintf('FAIL: %s\n', ME.message);
                 end
+                if ~isempty(runtime)
+                    diagnostics = runtime.report(true);
+                    writeJson(fullfile(case_dir,sprintf('run_%d_diagnostics.json',r)),diagnostics);
+                end
+                clear runtime_guard;
+                diary off;
+                diary(log_path);
+                fprintf('[%d/%d] %s x %s run=%d status=%s log=%s\n', ...
+                    count,total,algoName,char(prob.class),r,record.status,record.log);
+                if strcmp(record.status,'failed'), fprintf('FAIL: %s\n',record.error); end
                 writeJson(manifest_path,manifest);
             end
         end
@@ -191,8 +222,11 @@ function id = newExperimentId(cfg)
         'Invalid experiment_id: %s',id);
 end
 
-function saveExperimentResult(Algorithm,Problem,folder,info)
+function saveExperimentResult(Algorithm,Problem,folder,info,runtime)
     % 沿用平台的指标计算和 result 结构，仅改变保存位置并补充来源信息。
+    if ~isempty(runtime)
+        info.runtime_diagnostics = runtime.check(Problem.FE >= Problem.maxFE);
+    end
     if Problem.FE < Problem.maxFE
         return;
     end

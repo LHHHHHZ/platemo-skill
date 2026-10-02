@@ -239,6 +239,13 @@ def summarize(grouped):
 def validate_evidence(args, grouped, rows):
     """校验每个问题/指标的样本和 baseline，失败时禁止生成优劣结论。"""
     issues = list(args.issues)
+    from set_nsgaiii_runtime import diagnostic_issues
+    for experiment in args.provenance:
+        for record in experiment['records']:
+            for issue in diagnostic_issues(record):
+                issues.append({**issue, 'algorithm': record['series'], 'problem': record['problem'],
+                               'M': record['M'], 'D': record['D'], 'run': record['run'],
+                               'file': record['file']})
     groups = []
     wanted = split_csv(args.metrics)
     labels = {key[3] for key in grouped}
