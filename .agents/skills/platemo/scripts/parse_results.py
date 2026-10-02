@@ -11,6 +11,8 @@ import numpy as np
 from scipy.io import loadmat
 from scipy.stats import mannwhitneyu
 
+from experiment_manifest import experiment_files
+
 # PlatEMO 指标注释里的 <min> / <max>。未列出的指标按越小越好，并在输出里警告。
 LOWER_IS_BETTER = {
     "IGD", "GD", "IGDp", "IGDX", "Spacing", "Spread", "DeltaP", "CPF",
@@ -32,9 +34,15 @@ def natural_key(text):
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Compare PlatEMO metric .mat files")
-    parser.add_argument("--data-dir", type=Path, help="PlatEMO/Data directory (one subfolder per algorithm)")
-    parser.add_argument("--series", action="append", default=[], metavar="LABEL=DIR",
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--manifest", type=Path, help="One completed experiment manifest.json")
+    source.add_argument("--experiment", action="append", default=[], metavar="LABEL=MANIFEST",
+                        help="Compare experiment versions, repeatable; labels become LABEL/ALGORITHM")
+    source.add_argument("--data-dir", type=Path, help="Legacy PlatEMO/Data directory; requires --allow-legacy")
+    source.add_argument("--series", action="append", default=[], metavar="LABEL=DIR",
                         help="Explicit result folder, repeatable. Use this to compare a backup against a rerun.")
+    parser.add_argument("--allow-legacy", action="store_true",
+                        help="Explicitly allow unverified legacy folders without experiment provenance")
     parser.add_argument("--metrics", default="IGD,HV", help="Comma-separated metric names")
     parser.add_argument("--baseline", default="", help="Baseline algorithm label for the rank-sum test")
     parser.add_argument("--algorithms", default="", help="Comma-separated algorithm folder names to keep")
@@ -84,6 +92,16 @@ def final_value(raw):
 
 def collect_files(args):
     """返回 [(label, class_name, path), ...]。class_name 用于从文件名剥掉算法前缀。"""
+    if args.manifest or args.experiment:
+        try:
+            rows, args.provenance = experiment_files(args)
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+        return rows
+    if not args.allow_legacy:
+        raise SystemExit("Legacy folders have no experiment provenance. Use --manifest, or explicitly pass --allow-legacy.")
+    print("WARNING: legacy comparison is unverified; budgets, parameters, versions and run membership are unknown.", file=sys.stderr)
+    args.provenance = []
     selected = set(split_csv(args.algorithms))
     rows = []
     if args.series:
@@ -285,7 +303,8 @@ def main():
     tests = rank_tests(rows, args.baseline, args.alpha)
     print(render_table(rows, tests))
     if args.json_path:
-        payload = {"rows": [public_row(row) for row in rows], "tests": tests, "alpha": args.alpha}
+        payload = {"rows": [public_row(row) for row in rows], "tests": tests, "alpha": args.alpha,
+                   "provenance_verified": bool(args.provenance), "experiments": args.provenance}
         args.json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
         print(f"json={args.json_path}", file=sys.stderr)
     return 0

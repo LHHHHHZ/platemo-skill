@@ -2,12 +2,13 @@
 name: platemo
 description: "Run or compare PlatEMO experiments and iterate one algorithm from IGD/HV. Use for PlatEMO, LSMOP, SMOP, LSCM, or batch multi-objective runs. 在 PlatEMO 上批量运行算法、对比指标并迭代算法。"
 license: MIT
-compatibility: MATLAB R2019a+ and Python with numpy and scipy. Scripts are in scripts/ next to this file.
 ---
 
 用用户正在使用的语言回复。日志和命令保持英文。
 
-这个技能驱动 PlatEMO 实验：批量运行任意已安装算法，读取 `Data` 里的指标，判断优劣，并在用户要求迭代时只改被点名的那个算法。默认测试集是大规模多目标问题。不要启动无参数的 `platemo()`，那会打开 GUI。
+需要 MATLAB R2019a+，以及安装 numpy、scipy 的 Python。配套脚本在本文件旁的 `scripts/` 目录。
+
+这个技能驱动 PlatEMO 实验：批量运行任意已安装算法，按实验清单读取指标，判断优劣，并在用户要求迭代时只改被点名的那个算法。默认测试集是大规模多目标问题。不要启动无参数的 `platemo()`，那会打开 GUI。
 
 调用技能时用户给出的文字里可以有：
 
@@ -16,6 +17,7 @@ compatibility: MATLAB R2019a+ and Python with numpy and scipy. Scripts are in sc
 - `--algorithms`：逗号分隔的类名。没有就问，不要默认成某一个算法。
 - `--problems`：逗号分隔的问题类名。
 - `--M`、`--D`、`--N`、`--maxFE`、`--runs`、`--metrics`、`--baseline`、`--config`。
+- 比较已有实验时提供 `manifest.json` 路径；比较多个版本时为每份清单指定不同的实验标签。
 
 算法和问题都用 `classdef` 后面的类名，不要用文件夹名。`NSGA-III` 文件夹里的类是 `NSGAIII`，`MOEA/D` 是 `MOEAD`。不确定时搜索 `classdef`。
 
@@ -49,7 +51,11 @@ compatibility: MATLAB R2019a+ and Python with numpy and scipy. Scripts are in sc
 - `<PLATEMO>`：包含 `platemo.m` 的目录。发行包若是外层套着 `PlatEMO/` 文件夹，就用里面那一层。
 - 本技能的 `scripts/run_platemo_batch.m` 和 `scripts/parse_results.py` 与本文件同级。
 - 配置写到 `<PLATEMO>/../experiment_config.json`；若 `<PLATEMO>` 本身就是仓库根，就写到 `<PLATEMO>/experiment_config.json`。
-- 结果在 `<PLATEMO>/Data/<算法类名>/<算法类名>_<问题类名>_M<实际M>_D<实际D>_<run>.mat`。相同 `run` 会覆盖旧文件。`Data` 下以下划线开头的目录是备份。
+- 每次 run 新建 `<PLATEMO>/Experiments/<experiment_id>/`，保存 `config.json`、`manifest.json`、`batch_run.log` 和 `Data/a<算法序号>_p<问题序号>/*.mat`。清单列出本次运行的结果和来源，比较只读清单中的文件。
+- `experiment_id` 默认自动生成。用户可在配置中指定，但已存在时拒绝运行。不要删除旧目录来复用编号。
+- 配置可选 `experiment_root`，覆盖实验根目录；相对路径以配置文件所在目录为基准。
+- 同一算法的不同参数写为多条 algorithms，每条指定唯一 `label`，例如 `{"class":"SET_NSGAIII","label":"online","params":[2,20]}`。默认 label 是类名，重复 label 会被拒绝。baseline 使用 label。
+- 平台原有 `Data/` 目录供历史数据浏览；新运行器使用自定义 outputFcn 直接保存独立结果，沿用平台的 result、metric 和指标计算。
 
 配置示例：
 
@@ -84,7 +90,7 @@ matlab -batch "cd('<PLATEMO>'); addpath('<SCRIPTS>'); run_platemo_batch('<CONFIG
 ```
 
 路径含空格时保持 MATLAB 单引号，斜杠用 `/`。
-5. 启动后只报告配置摘要和 `batch_run.log` 的位置。不要假装已经看到指标。
+5. 启动后只报告配置摘要，以及日志中的 `EXPERIMENT_ID`、`MANIFEST` 和该实验 `batch_run.log` 的位置。不要假装已经看到指标。后续比较使用这份清单，不要猜测哪个目录是最新实验。
 6. 结束后先看 `BATCH_SUMMARY`。`fail` 不为 0 就摘出 `FAIL:` 行，不要对比坏数据。日志表明算法依赖没有初始化并已退回另一种搜索时，这次对比无效。
 7. 日志有效后再做 compare。
 
@@ -92,19 +98,23 @@ matlab -batch "cd('<PLATEMO>'); addpath('<SCRIPTS>'); run_platemo_batch('<CONFIG
 
 ## compare
 
-不要改算法、问题或配置。把类名换成这次配置里的名字：
+不要改算法、问题或配置。使用本次 run 输出的清单，算法筛选和 baseline 使用配置中的 label（未指定 label 时用类名）：
 
 ```text
-<PY> <SCRIPTS>/parse_results.py --data-dir <PLATEMO>/Data --metrics IGD,HV --algorithms LMOCSO,NSGAII --baseline NSGAII --json <PLATEMO>/experiment_metrics.json
+<PY> <SCRIPTS>/parse_results.py --manifest <EXPERIMENT>/manifest.json --metrics IGD,HV --algorithms LMOCSO,NSGAII --baseline NSGAII --json <EXPERIMENT>/experiment_metrics.json
 ```
 
-同一算法的备份和新结果用重复的 `--series`，不要和 `--data-dir` 混用：
+比较修改前后两个实验，用重复的 `--experiment`。输出标签是 `<实验标签>/<算法label>`，因此可直接检验新版本相对旧版本的变化：
 
 ```text
---series "old=<PLATEMO>/Data/_backup_<时间戳>/<算法类名>" --series "new=<PLATEMO>/Data/<算法类名>" --series "base=<PLATEMO>/Data/<基线类名>" --baseline base
+<PY> <SCRIPTS>/parse_results.py --experiment "old=<OLD>/manifest.json" --experiment "new=<NEW>/manifest.json" --metrics IGD,HV --baseline old/SET_NSGAIII --json <NEW>/iteration_metrics.json
 ```
 
 向用户报告每个问题、每个指标的 `mean +/- std` 和 `n`，并带上 M、D。`*` 是该行均值最优。IGD、GD 越小越好；HV 越大越好。`+`、`-`、`=` 是相对 baseline 的双侧 Mann-Whitney 检验，默认 α=0.05。`na` 表示任一侧少于 2 次运行。runs 小于 5 时说明显著性只能当线索。按问题指出落后的位置，不要只报一个平均名次。
+
+清单模式会检查实验完成状态、运行成员、结果文件 SHA-256，以及相同问题 M/D 下的 N、maxFE、save_count、问题参数、问题源码和平台/指标源码是否一致。协议不一致时停止比较；算法参数和算法源码可以不同，这是算法或版本对比的目的。实际 N、FE、算法目录源码和已有预训练权重的 hash 保存在来源记录中，JSON 报告包含所用清单和记录。
+
+没有清单的历史数据，仅在用户明确要浏览历史结果时使用 `--data-dir ... --allow-legacy` 或 `--series ... --allow-legacy`，并说明预算、参数和版本未验证。不要把这种汇总用于 iterate，也不要伪造清单给旧文件补上未知来源。
 
 `files_used` 为 0 或缺少请求的指标时，这些 `.mat` 不是用 `save>0` 和 `metName` 生成的。不要自己用目标值临时估算 IGD 或 HV。
 
@@ -114,8 +124,8 @@ matlab -batch "cd('<PLATEMO>'); addpath('<SCRIPTS>'); run_platemo_batch('<CONFIG
 
 1. 先完整做一次 compare。没有可用指标就停止。
 2. 只把落后的问题当成修改依据。用 `classdef` 定位该类的 `.m`，只在需要时读同目录里的辅助文件。不要顺手重构，也不要改别的算法。
-3. 修改前把源文件复制到 `<SCRIPTS>/backups/<yyyyMMdd-HHmmss>/`。把配置里每个算法的结果目录复制到 `<PLATEMO>/Data/_backup_<同一时间戳>/<算法类名>/`。备份失败就不要重跑。
+3. 记录旧实验清单路径，把准备修改的源文件复制到 `<OLD>/source_backup/<yyyyMMdd-HHmmss>/`。旧实验结果目录保持原样，无需再复制整个 Data。源码备份失败就不要修改或重跑。
 4. 只改一个机制或一个明确的 bug。说明改了什么、期望哪些问题变好、什么结果算退步。
-5. 用同一份配置再走 run。不要顺便换算法、问题、D 或 maxFE。
-6. 用 `--series` 把备份、新结果和基线放在同一张表里。改进不足或落后问题变多时，用源文件备份覆盖回去，并说明已回退。不要删除 `Data/_backup_*`。
+5. 用相同实验配置再走 run。若原配置有显式 experiment_id，仅删除或更换该字段以建立新实验。不要顺便换算法、问题、D 或 maxFE。记录新清单路径。
+6. 用 `--experiment old=... --experiment new=...` 把修改前、新结果和配置里的基线放在同一张表里。改进不足或落后问题变多时，用源文件备份恢复源码，并说明已回退。两个实验及其清单都保留，回退源码不改变历史结果的归属。
 7. 给出改动、保留还是回退、哪些问题变好或变差，以及下一轮只值得试什么。不要自动开始下一轮。

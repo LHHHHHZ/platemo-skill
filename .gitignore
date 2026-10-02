@@ -3,3 +3,4 @@ __pycache__/
 batch_run.log
 experiment_config.json
 experiment_metrics.json
+tests/.tmp/
